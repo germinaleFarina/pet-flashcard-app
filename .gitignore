@@ -1,0 +1,8 @@
+venv/
+.buildozer/
+.buildozer_global/
+bin/
+source/
+*.log
+*.jsonl
+deck.db

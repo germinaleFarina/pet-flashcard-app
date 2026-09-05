@@ -1,0 +1,260 @@
+word,translation
+Hallo!,Hi!
+Guten Tag!,Hello!
+Tschüss!,Goodbye! / Bye!
+Danke!,Thank you!
+Bitte!,Please!
+Es tut mir leid.,I'm sorry.
+Entschuldigen Sie!,Excuse me!
+Stopp!,Stop!
+Vorsicht!,Caution!
+Hilfe!,Help!
+ja,yes
+nein,no
+Was ist …?,What is …?
+Wo ist …?,Where is …?
+Wie …?,How …?
+Wie viel kostet es?,How much is it?
+Wie lange dauert es?,How long does it take?
+Wie viel Uhr ist es?,What time is it?
+Sprechen Sie Englisch?,Do you speak English?
+Gibt es …?,Is there …?
+Ich hätte gerne …,I would like ...
+Ich brauche …,I need ...
+Ich verstehe nicht.,I don't understand.
+Kein Problem!,No problem!
+die Richtung,direction
+der Eingang,entrance
+der Ausgang,exit
+die Straße,street
+der Weg,way
+der Platz,square
+rechts,right
+links,left
+geradeaus,straight ahead
+zurück,back (direction)
+hier,here
+dort,there
+die Karte,map
+das Haus,house
+die Wohnung,apartment
+das Hotel,hotel
+das Museum,museum
+die Toilette,toilet
+die Bank,bank
+die Stadt,city
+der Strand,beach
+der Wald,forest
+der Berg,mountain
+der Park,park
+der Fluss,river
+das Meer,sea
+der See,lake
+das Wetter,weather
+die Sonne,sun
+der Regen,rain
+der Schnee,snow
+das Gewitter,thunderstorm
+das Zimmer,room
+der Schlüssel,key
+das Bett,bed
+die Dusche,shower
+das Handtuch,towel
+die Reservierung,reservation
+der Supermarkt,supermarket
+das Geld,cash
+der Preis,price
+der Kassenbon,receipt
+der Geldautomat,"cash machine, ATM"
+die Kreditkarte,credit card
+die Tasche,bag
+der Tampon,tampon
+die Binde,(sanitary) pad
+das Kondom,condom
+die Zahnbürste,toothbrush
+die Hilfe,help
+die Polizei,police
+das Essen,food
+das Frühstück,breakfast
+das Restaurant,restaurant
+das Café,café
+die Bar,bar
+die Speisekarte,menu
+die Vorspeise,starter
+die Hauptspeise,main course
+der Nachtisch,dessert
+die Rechnung,bill
+vegetarisch,vegetarian
+vegan,vegan
+glutenfrei,gluten-free
+scharf,spicy
+der Fisch,fish
+das Fleisch,meat
+das Schweinefleisch,pork
+der Salat,salad
+die Milch,milk
+der Käse,cheese
+das Brot,bread
+das Obst,fruits
+das Gemüse,vegetables
+die Nüsse,nuts
+der Kaffee,coffee
+der Tee,tea
+das Wasser,water
+der Wein,wine
+das Bier,beer
+alkoholfrei,non-alcoholic
+Prost!,Cheers!
+der Zug,train
+der Bus,bus
+das Auto,car
+die Straßenbahn,tram
+das Taxi,"taxi, cab"
+das Fahrrad,bicycle
+zu Fuß,on foot
+der Bahnhof,train station
+der Busbahnhof,bus station
+der Flughafen,airport
+das Flugzeug,plane
+die Haltestelle,stop
+die Fahrkarte,ticket
+das Gepäck,luggage
+das Internet,internet
+das Passwort,password
+das WLAN,wifi
+der Computer,computer
+das Telefon,phone
+die Steckdose,socket
+das Ladegerät,charger
+aufladen,to recharge
+die Zeit,time
+der Tag,day
+die Woche,week
+der Monat,month
+das Jahr,year
+die Stunde,hour
+die Minute,minute
+Montag,Monday
+Dienstag,Tuesday
+Mittwoch,Wednesday
+Donnerstag,Thursday
+Freitag,Friday
+Samstag,Saturday
+Sonntag,Sunday
+morgens,in the morning
+nachmittags,in the afternoon
+abends,in the evening
+nachts,at night
+gestern,yesterday
+heute,today
+morgen,tomorrow
+jetzt,now
+früher,earlier
+später,later
+pünktlich,on time
+verspätet,delayed
+der Arzt / die Ärztin,doctor
+das Krankenhaus,hospital
+die Apotheke,pharmacy
+das Schmerzmittel,painkiller
+das Medikament,medicine
+der Notfall,emergency
+die Allergie,allergy
+die Versicherung,insurance
+die Schmerzen,pain
+der Rücken,back
+der Fuß,foot
+der Bauch,stomach
+das Bein,leg
+der Kopf,head
+die Hand,hand
+der Arm,arm
+der Zahn,tooth
+der Vorname,first name
+der Nachname,last name
+die Adresse,address
+die Telefonnummer,phone number
+das Land,country
+der Geburtsort,place of birth
+das Geburtsdatum,date of birth
+der Pass,passport
+der Beruf,"profession, job"
+der Mann,man
+die Frau,woman
+der / die Erwachsene,adult
+das Kind,child
+arbeiten,to work
+besuchen,to visit
+bleiben,to stay
+brauchen,to need
+essen,to eat
+fragen,to ask
+geben,to give
+gehen,to go
+haben,to have
+helfen,to help
+kaufen,to buy
+kommen,to come
+können,(I/you/we/they) can
+lernen,to learn
+machen,to make
+nehmen,to take
+sagen,to say
+schlafen,to sleep
+schreiben,to write
+sehen,to see
+sein,to be
+sprechen,to speak
+suchen,to search
+telefonieren,to call
+trinken,to drink
+verstehen,to understand
+warten,to wait
+wissen,to know
+wollen,to want
+zahlen,to pay
+gut,good
+schlecht,bad
+neu,new
+alt,old
+jung,young
+groß,big
+klein,small
+schön,beautiful
+billig,cheap
+teuer,expensive
+heiß,hot
+kalt,cold
+dunkel,dark
+hell,bright
+offen,open
+geschlossen,closed
+nah,near
+weit,far
+zusammen,together
+getrennt,separate
+wichtig,important
+müde,tired
+die Farbe,color
+weiß,white
+schwarz,black
+rot,red
+blau,blue
+grün,green
+gelb,yellow
+bunt,colorful
+null,zero
+eins,one
+zwei,two
+drei,three
+vier,four
+fünf,five
+sechs,six
+sieben,seven
+acht,eight
+neun,nine
+zehn,ten
+zwanzig,twenty
+fünfzig,fifty
+hundert,hundred
+tausend,thousand
