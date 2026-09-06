@@ -30,10 +30,10 @@ jobs:
             zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev build-essential \
             libltdl-dev
 
-      - name: Install buildozer
+      - name: Install buildozer (versioni bloccate, non "latest")
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer cython
+          pip install buildozer==1.5.0 "cython<3.0" "python-for-android==2024.1.21"
 
       - name: Set up Android SDK command line tools
         run: |
