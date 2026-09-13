@@ -79,7 +79,7 @@ ScreenManager:
             font_style: "H3"
             bold: True
             size_hint_y: None
-            height: self.texture_size[1] + "12dp"
+            height: self.texture_size[1] + dp(12)
 
         MDLabel:
             text: "your minimalist digital vocabulary"
