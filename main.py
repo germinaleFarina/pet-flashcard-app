@@ -45,7 +45,7 @@ BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 TODAY = date.today().isoformat()
 
 SEARCH_DEBOUNCE_SECONDS = 0.18
-SPLASH_DURATION_SECONDS = 1.8
+SPLASH_DURATION_SECONDS = 3.0
 
 KV = """
 ScreenManager:
@@ -89,7 +89,16 @@ ScreenManager:
             font_style: "Subtitle1"
 
         Widget:
-            size_hint_y: 0.4
+            size_hint_y: 0.3
+
+        MDLabel:
+            text: "Powered and Developed by Germinale Shinoda"
+            halign: "center"
+            theme_text_color: "Custom"
+            text_color: 0.4, 0.4, 0.4, 1
+            font_style: "Caption"
+            size_hint_y: None
+            height: self.texture_size[1] + dp(8)
 
 <SearchScreen>:
     name: "search"
@@ -104,7 +113,7 @@ ScreenManager:
 
         MDTextField:
             id: search_field
-            hint_text: "Cerca vocabolo..."
+            hint_text: "Search a word..."
             mode: "rectangle"
             on_text: app.on_search_text(self.text)
 
@@ -127,7 +136,7 @@ ScreenManager:
                 font_style: "H6"
 
         MDRaisedButton:
-            text: "+ Aggiungi flashcard (diretta + inversa)"
+            text: "+ Add flashcard (front + reverse)"
             pos_hint: {"center_x": 0.5}
             disabled: not app.current_word
             on_release: app.add_flashcard()
@@ -243,7 +252,7 @@ class ReviewScreen(MDScreen):
 
 
 class FlashcardApp(MDApp):
-    current_translation = StringProperty("Digita una parola per iniziare")
+    current_translation = StringProperty("")
     current_word = StringProperty("")
     status_text = StringProperty("")
 
@@ -340,7 +349,7 @@ class FlashcardApp(MDApp):
         suggestions_list = self.root.get_screen("search").ids.suggestions_list
         suggestions_list.clear_widgets()
         self.current_word = ""
-        self.current_translation = "Digita una parola per iniziare"
+        self.current_translation = ""
 
         prefix = text.strip().lower()
         if not prefix:
@@ -385,7 +394,7 @@ class FlashcardApp(MDApp):
 
     def _refresh_deck_count(self):
         count = self.deck_con.execute("SELECT COUNT(*) FROM deck").fetchone()[0]
-        self.status_text = f"Mazzo locale: {count} carte"
+        self.status_text = f"Local deck: {count} cards"
 
     # ---------- Navigazione ----------
     def go_to_deck(self):

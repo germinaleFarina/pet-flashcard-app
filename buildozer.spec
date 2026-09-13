@@ -6,7 +6,7 @@
 [app]
 
 # (str) Title of your application
-title = My Application
+title = DigiVol
 
 # (str) Package name
 package.name = myapp
@@ -454,7 +454,7 @@ warn_on_root = 1
 #
 #   Warning: Comments cannot be used "inline" - i.e.
 #       [app]
-#       title = My Application # This is not a comment, it is part of the title.
+#       title = DigiVol # This is not a comment, it is part of the title.
 #
 #   Warning: Indented text is treated as a multiline string - i.e.
 #       [app]
@@ -486,7 +486,7 @@ warn_on_root = 1
 #   and extend the excluded directories to remove the HD content.
 #
 #       [app@demo]
-#       title = My Application (demo)
+#       title = DigiVol (demo)
 #
 #       [app:source.exclude_patterns@demo]
 #       images/hd/*
