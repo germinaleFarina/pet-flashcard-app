@@ -9,6 +9,13 @@ Include ripasso a ripetizione spaziata (algoritmo SM-2 semplificato):
 ogni carta ha un intervallo, un fattore di facilita' e una data di
 scadenza che si aggiornano in base a come valuti il ripasso.
 
+Note sulle prestazioni:
+- Le connessioni SQLite (vocab e mazzo) vengono aperte UNA volta sola
+  all'avvio e riutilizzate, invece di aprirle e chiuderle ad ogni ricerca.
+- La ricerca usa un piccolo "debounce": aspetta ~180ms dopo l'ultimo
+  tasto premuto prima di interrogare il database e ricostruire la lista,
+  cosi' digitare veloce non genera una query/redraw per ogni lettera.
+
 Prima del primo avvio, importa un vocabolario CSV con:
     python import_vocab.py --csv dizionario.csv --col-word word --col-translation translation
 
@@ -21,6 +28,7 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
+from kivy.clock import Clock
 from kivy.lang import Builder
 from kivy.properties import StringProperty, BooleanProperty
 from kivymd.app import MDApp
@@ -33,6 +41,8 @@ APP_DIR = Path(__file__).parent
 BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 
 TODAY = date.today().isoformat()
+
+SEARCH_DEBOUNCE_SECONDS = 0.18
 
 KV = """
 ScreenManager:
@@ -200,6 +210,8 @@ class FlashcardApp(MDApp):
     answer_revealed = BooleanProperty(False)
     review_status_text = StringProperty("")
 
+    _search_event = None
+
     def build(self):
         self.theme_cls.primary_palette = "Teal"
         self.theme_cls.theme_style = "Light"
@@ -214,10 +226,22 @@ class FlashcardApp(MDApp):
         self.deck_db_path = data_dir / "deck.db"
 
         self._ensure_vocab_db()
+
+        # Connessioni aperte una sola volta e riutilizzate per tutta la vita
+        # dell'app, invece di aprirle/chiuderle ad ogni interazione.
+        self.vocab_con = sqlite3.connect(str(self.vocab_db_path), check_same_thread=False)
+        self.deck_con = sqlite3.connect(str(self.deck_db_path), check_same_thread=False)
+
         self._init_deck_db()
         self.root = Builder.load_string(KV)
         self._refresh_deck_count()
         return self.root
+
+    def on_stop(self):
+        # Chiude in modo pulito le connessioni persistenti quando l'app termina.
+        for con in (getattr(self, "vocab_con", None), getattr(self, "deck_con", None)):
+            if con is not None:
+                con.close()
 
     # ---------- Setup database ----------
     def _ensure_vocab_db(self):
@@ -231,7 +255,7 @@ class FlashcardApp(MDApp):
         shutil.copy(BUNDLED_VOCAB_DB, self.vocab_db_path)
 
     def _init_deck_db(self):
-        con = sqlite3.connect(self.deck_db_path)
+        con = self.deck_con
         con.execute(
             "CREATE TABLE IF NOT EXISTS deck ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -250,10 +274,18 @@ class FlashcardApp(MDApp):
             if col not in existing_cols:
                 con.execute(stmt)
         con.commit()
-        con.close()
 
-    # ---------- Ricerca ----------
+    # ---------- Ricerca (con debounce) ----------
     def on_search_text(self, text):
+        # Annulla la ricerca programmata precedente se l'utente sta ancora
+        # digitando: evita una query + ricostruzione lista per ogni lettera.
+        if self._search_event is not None:
+            self._search_event.cancel()
+        self._search_event = Clock.schedule_once(
+            lambda dt: self._run_search(text), SEARCH_DEBOUNCE_SECONDS
+        )
+
+    def _run_search(self, text):
         suggestions_list = self.root.get_screen("search").ids.suggestions_list
         suggestions_list.clear_widgets()
         self.current_word = ""
@@ -263,13 +295,11 @@ class FlashcardApp(MDApp):
         if not prefix:
             return
 
-        con = sqlite3.connect(self.vocab_db_path)
-        cur = con.execute(
+        cur = self.vocab_con.execute(
             "SELECT word, translation FROM vocab WHERE word LIKE ? ORDER BY word LIMIT 15",
             (prefix + "%",),
         )
         rows = cur.fetchall()
-        con.close()
 
         for word, translation in rows:
             item = TwoLineListItem(
@@ -288,7 +318,7 @@ class FlashcardApp(MDApp):
         if not self.current_word:
             return
         front, back = self.current_word, self.current_translation
-        con = sqlite3.connect(self.deck_db_path)
+        con = self.deck_con
         con.execute(
             "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, repetitions) "
             "VALUES (?, ?, ?, 0, 2.5, 0)",
@@ -300,13 +330,10 @@ class FlashcardApp(MDApp):
             (back, front, TODAY),
         )
         con.commit()
-        con.close()
         self._refresh_deck_count()
 
     def _refresh_deck_count(self):
-        con = sqlite3.connect(self.deck_db_path)
-        count = con.execute("SELECT COUNT(*) FROM deck").fetchone()[0]
-        con.close()
+        count = self.deck_con.execute("SELECT COUNT(*) FROM deck").fetchone()[0]
         self.status_text = f"Mazzo locale: {count} carte"
 
     # ---------- Navigazione ----------
@@ -325,21 +352,17 @@ class FlashcardApp(MDApp):
     def _populate_deck_screen(self):
         deck_list = self.root.get_screen("deck").ids.deck_list
         deck_list.clear_widgets()
-        con = sqlite3.connect(self.deck_db_path)
-        rows = con.execute("SELECT front, back FROM deck ORDER BY id DESC").fetchall()
-        con.close()
+        rows = self.deck_con.execute("SELECT front, back FROM deck ORDER BY id DESC").fetchall()
         for front, back in rows:
             deck_list.add_widget(TwoLineListItem(text=front, secondary_text=back))
 
     # ---------- Ripasso a ripetizione spaziata ----------
     def _load_review_queue(self):
-        con = sqlite3.connect(self.deck_db_path)
-        rows = con.execute(
+        rows = self.deck_con.execute(
             "SELECT id, front, back, interval_days, ease_factor, repetitions "
             "FROM deck WHERE due_date <= ? ORDER BY due_date ASC, id ASC",
             (TODAY,),
         ).fetchall()
-        con.close()
         self.review_queue = [
             {
                 "id": r[0], "front": r[1], "back": r[2],
@@ -401,13 +424,11 @@ class FlashcardApp(MDApp):
 
         due_date = (date.today() + timedelta(days=interval)).isoformat()
 
-        con = sqlite3.connect(self.deck_db_path)
-        con.execute(
+        self.deck_con.execute(
             "UPDATE deck SET due_date=?, interval_days=?, ease_factor=?, repetitions=? WHERE id=?",
             (due_date, interval, ease_factor, repetitions, card["id"]),
         )
-        con.commit()
-        con.close()
+        self.deck_con.commit()
 
         self._show_next_review_card()
 
