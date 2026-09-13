@@ -9,12 +9,20 @@ Include ripasso a ripetizione spaziata (algoritmo SM-2 semplificato):
 ogni carta ha un intervallo, un fattore di facilita' e una data di
 scadenza che si aggiornano in base a come valuti il ripasso.
 
+Include anche uno switch per invertire la direzione di ricerca:
+di default cerchi parole tedesche e vedi la traduzione inglese;
+con il pulsante "swap" nella barra in alto cerchi parole inglesi
+e vedi la traduzione tedesca.
+
 Note sulle prestazioni:
 - Le connessioni SQLite (vocab e mazzo) vengono aperte UNA volta sola
   all'avvio e riutilizzate, invece di aprirle e chiuderle ad ogni ricerca.
 - La ricerca usa un piccolo "debounce": aspetta ~180ms dopo l'ultimo
   tasto premuto prima di interrogare il database e ricostruire la lista,
   cosi' digitare veloce non genera una query/redraw per ogni lettera.
+- Viene creato (una sola volta) un indice anche sulla colonna translation,
+  cosi' la ricerca inversa (inglese -> tedesco) resta rapida quanto quella
+  originale.
 
 Prima del primo avvio, importa un vocabolario CSV con:
     python import_vocab.py --csv dizionario.csv --col-word word --col-translation translation
@@ -45,7 +53,10 @@ BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 TODAY = date.today().isoformat()
 
 SEARCH_DEBOUNCE_SECONDS = 0.18
-SPLASH_DURATION_SECONDS = 3.0
+SPLASH_DURATION_SECONDS = 8.0
+
+DE_HINT = "Search a German word..."
+EN_HINT = "Search an English word..."
 
 KV = """
 ScreenManager:
@@ -68,7 +79,7 @@ ScreenManager:
         Image:
             source: "icon.png"
             size_hint: None, None
-            size: "140dp", "140dp"
+            size: "250dp", "250dp"
             pos_hint: {"center_x": 0.5}
 
         MDLabel:
@@ -77,9 +88,10 @@ ScreenManager:
             theme_text_color: "Custom"
             text_color: 1, 1, 1, 1
             font_style: "H3"
+            font_name: "Roboto-Bold"
             bold: True
             size_hint_y: None
-            height: self.texture_size[1] + dp(12)
+            height: self.texture_size[1] + dp(4)
 
         MDLabel:
             text: "your minimalist digital vocabulary"
@@ -87,6 +99,10 @@ ScreenManager:
             theme_text_color: "Custom"
             text_color: 0.6, 0.6, 0.6, 1
             font_style: "Subtitle1"
+            font_name: "Roboto"
+            font_size: "18sp"
+            size_hint_y: None
+            height: self.texture_size[1]
 
         Widget:
             size_hint_y: 0.3
@@ -109,11 +125,11 @@ ScreenManager:
 
         MDTopAppBar:
             title: "DigiVol"
-            right_action_items: [["school-outline", lambda x: app.go_to_review()], ["cards-outline", lambda x: app.go_to_deck()]]
+            right_action_items: [["swap-horizontal", lambda x: app.toggle_search_direction()], ["school-outline", lambda x: app.go_to_review()], ["cards-outline", lambda x: app.go_to_deck()]]
 
         MDTextField:
             id: search_field
-            hint_text: "Search a word..."
+            hint_text: app.search_hint_text
             mode: "rectangle"
             on_text: app.on_search_text(self.text)
 
@@ -126,7 +142,7 @@ ScreenManager:
             orientation: "vertical"
             padding: "12dp"
             size_hint_y: None
-            height: "90dp"
+            height: "170dp"
             radius: [12]
             MDLabel:
                 id: translation_label
@@ -256,6 +272,10 @@ class FlashcardApp(MDApp):
     current_word = StringProperty("")
     status_text = StringProperty("")
 
+    # Direzione di ricerca: False = tedesco -> inglese, True = inglese -> tedesco
+    reversed_search = BooleanProperty(False)
+    search_hint_text = StringProperty(DE_HINT)
+
     # ---------- Stato ripasso ----------
     review_queue = []
     current_card_id = None
@@ -286,6 +306,14 @@ class FlashcardApp(MDApp):
         # dell'app, invece di aprirle/chiuderle ad ogni interazione.
         self.vocab_con = sqlite3.connect(str(self.vocab_db_path), check_same_thread=False)
         self.deck_con = sqlite3.connect(str(self.deck_db_path), check_same_thread=False)
+
+        # Indice anche sulla traduzione, cosi' la ricerca inversa (EN -> DE)
+        # resta rapida quanto quella originale. Viene creato una sola volta:
+        # se esiste gia' (avvii successivi) l'operazione e' istantanea.
+        self.vocab_con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_translation ON vocab (translation COLLATE NOCASE)"
+        )
+        self.vocab_con.commit()
 
         self._init_deck_db()
         self.root = Builder.load_string(KV)
@@ -335,6 +363,19 @@ class FlashcardApp(MDApp):
                 con.execute(stmt)
         con.commit()
 
+    # ---------- Switch direzione di ricerca ----------
+    def toggle_search_direction(self):
+        self.reversed_search = not self.reversed_search
+        self.search_hint_text = EN_HINT if self.reversed_search else DE_HINT
+
+        # Ripulisce lo stato della ricerca corrente, cosi' non resta a schermo
+        # un risultato nella direzione sbagliata.
+        self.current_word = ""
+        self.current_translation = ""
+        search_screen = self.root.get_screen("search")
+        search_screen.ids.search_field.text = ""
+        search_screen.ids.suggestions_list.clear_widgets()
+
     # ---------- Ricerca (con debounce) ----------
     def on_search_text(self, text):
         # Annulla la ricerca programmata precedente se l'utente sta ancora
@@ -355,18 +396,36 @@ class FlashcardApp(MDApp):
         if not prefix:
             return
 
-        cur = self.vocab_con.execute(
-            "SELECT word, translation FROM vocab WHERE word LIKE ? ORDER BY word LIMIT 15",
-            (prefix + "%",),
-        )
+        if self.reversed_search:
+            # Cerca per prefisso nella colonna translation (inglese) e mostra
+            # la parola tedesca corrispondente.
+            cur = self.vocab_con.execute(
+                "SELECT word, translation FROM vocab WHERE translation LIKE ? "
+                "ORDER BY translation LIMIT 15",
+                (prefix + "%",),
+            )
+        else:
+            cur = self.vocab_con.execute(
+                "SELECT word, translation FROM vocab WHERE word LIKE ? ORDER BY word LIMIT 15",
+                (prefix + "%",),
+            )
         rows = cur.fetchall()
 
         for word, translation in rows:
-            item = TwoLineListItem(
-                text=word,
-                secondary_text=translation,
-                on_release=lambda inst, w=word, t=translation: self.select_word(w, t),
-            )
+            if self.reversed_search:
+                # In modalita' invertita il termine cercato (inglese) va in
+                # primo piano nella lista, la parola tedesca come sottotitolo.
+                item = TwoLineListItem(
+                    text=translation,
+                    secondary_text=word,
+                    on_release=lambda inst, w=word, t=translation: self.select_word(t, w),
+                )
+            else:
+                item = TwoLineListItem(
+                    text=word,
+                    secondary_text=translation,
+                    on_release=lambda inst, w=word, t=translation: self.select_word(w, t),
+                )
             suggestions_list.add_widget(item)
 
     def select_word(self, word, translation):
