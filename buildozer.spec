@@ -49,7 +49,7 @@ requirements = python3,kivy,kivymd==1.2.0
 # requirements.source.kivy = ../../kivy
 
 # (str) Presplash of the application
-#presplash.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/icon.png
 
 # (str) Icon of the application
 #icon.filename = %(source.dir)s/icon.png
@@ -89,7 +89,7 @@ fullscreen = 0
 # red, blue, green, black, white, gray, cyan, magenta, yellow, lightgray,
 # darkgray, grey, lightgrey, darkgrey, aqua, fuchsia, lime, maroon, navy,
 # olive, purple, silver, teal.
-#android.presplash_color = #000000
+android.presplash_color = #000000
 
 # (string) Presplash animation using Lottie format.
 # see https://lottiefiles.com/ for examples and https://airbnb.design/lottie/

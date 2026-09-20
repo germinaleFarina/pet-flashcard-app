@@ -75,6 +75,37 @@ EN_HINT = "Search an English word..."
 # ripresa da dove era rimasta, invece di essere ricostruita da zero.
 REVIEW_SESSION_TIMEOUT_HOURS = 6
 
+# Soglie per la tolleranza ai typo nella ricerca: la ricerca "fuzzy" scatta
+# SOLO quando quella esatta (per prefisso, istantanea grazie all'indice)
+# non trova nulla - cosi' il caso normale resta sempre alla massima velocita'.
+TYPO_MIN_PREFIX_LENGTH = 3
+TYPO_CANDIDATE_LIMIT = 3000
+
+
+def _levenshtein(a, b):
+    """Distanza di edit tra due stringhe (numero minimo di sostituzioni,
+    inserimenti o cancellazioni per trasformare a in b). Implementazione
+    pura Python, nessuna dipendenza esterna necessaria."""
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if la == 0:
+        return lb
+    if lb == 0:
+        return la
+    previous_row = list(range(lb + 1))
+    for i, ca in enumerate(a, start=1):
+        current_row = [i] + [0] * lb
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            current_row[j] = min(
+                previous_row[j] + 1,      # cancellazione
+                current_row[j - 1] + 1,   # inserimento
+                previous_row[j - 1] + cost,  # sostituzione
+            )
+        previous_row = current_row
+    return previous_row[lb]
+
 KV = """
 ScreenManager:
     SplashScreen:
@@ -167,13 +198,6 @@ ScreenManager:
                 halign: "center"
                 theme_text_color: "Primary"
                 font_style: "H6"
-            MDLabel:
-                id: example_label
-                text: app.current_example
-                halign: "center"
-                theme_text_color: "Secondary"
-                font_style: "Body2"
-                italic: True
 
         MDRaisedButton:
             text: "+ Add flashcard (front + reverse)"
@@ -294,7 +318,6 @@ class ReviewScreen(MDScreen):
 
 class FlashcardApp(MDApp):
     current_translation = StringProperty("")
-    current_example = StringProperty("")
     current_word = StringProperty("")
     status_text = StringProperty("")
 
@@ -333,6 +356,13 @@ class FlashcardApp(MDApp):
         self.vocab_con = sqlite3.connect(str(self.vocab_db_path), check_same_thread=False)
         self.deck_con = sqlite3.connect(str(self.deck_db_path), check_same_thread=False)
 
+        # Ottimizzazioni di lettura: vocab.db non viene mai scritto a runtime
+        # dopo l'indice (e' un dizionario "di sola lettura" per l'app), quindi
+        # possiamo usare cache/memory-map per velocizzare ogni ricerca.
+        self.vocab_con.execute("PRAGMA temp_store = MEMORY")
+        self.vocab_con.execute("PRAGMA cache_size = -20000")  # ~20 MB di cache
+        self.vocab_con.execute("PRAGMA mmap_size = 268435456")  # 256 MB memory-map
+
         # Indici sia su word che su translation, cosi' entrambe le direzioni
         # di ricerca restano rapide. Vengono creati una sola volta: se
         # esistono gia' (avvii successivi) l'operazione e' istantanea.
@@ -340,6 +370,10 @@ class FlashcardApp(MDApp):
             "CREATE INDEX IF NOT EXISTS idx_translation ON vocab (translation COLLATE NOCASE)"
         )
         self.vocab_con.commit()
+
+        # Da qui in poi vocab_con fa solo letture: lo blocchiamo esplicitamente
+        # in sola lettura, un'ulteriore ottimizzazione che SQLite puo' sfruttare.
+        self.vocab_con.execute("PRAGMA query_only = ON")
 
         self._init_deck_db()
         self.root = Builder.load_string(KV)
@@ -433,7 +467,6 @@ class FlashcardApp(MDApp):
         suggestions_list.clear_widgets()
         self.current_word = ""
         self.current_translation = ""
-        self.current_example = ""
 
         prefix = text.strip().lower()
         if not prefix:
@@ -443,40 +476,72 @@ class FlashcardApp(MDApp):
             # Cerca per prefisso nella colonna translation (inglese) e mostra
             # la parola tedesca corrispondente.
             cur = self.vocab_con.execute(
-                "SELECT word, translation, gender, example FROM vocab WHERE translation LIKE ? "
+                "SELECT word, translation FROM vocab WHERE translation LIKE ? "
                 "ORDER BY translation LIMIT 15",
                 (prefix + "%",),
             )
         else:
             cur = self.vocab_con.execute(
-                "SELECT word, translation, gender, example FROM vocab WHERE word LIKE ? "
+                "SELECT word, translation FROM vocab WHERE word LIKE ? "
                 "ORDER BY word LIMIT 15",
                 (prefix + "%",),
             )
         rows = cur.fetchall()
 
-        for word, translation, gender, example in rows:
-            display_word = f"{gender} {word}" if gender else word
+        # Tolleranza ai typo: se la ricerca esatta non trova nulla e il
+        # prefisso e' abbastanza lungo da essere significativo, prova una
+        # ricerca approssimata (basata sulla prima lettera + distanza di
+        # edit) prima di arrenderti. Scatta solo in questo caso, quindi non
+        # rallenta mai la ricerca normale.
+        if not rows and len(prefix) >= TYPO_MIN_PREFIX_LENGTH:
+            rows = self._fuzzy_search(prefix)
+
+        for word, translation in rows:
             if self.reversed_search:
                 # In modalita' invertita il termine cercato (inglese) va in
                 # primo piano nella lista, la parola tedesca come sottotitolo.
                 item = TwoLineListItem(
                     text=translation,
-                    secondary_text=display_word,
-                    on_release=lambda inst, w=display_word, t=translation, e=example: self.select_word(t, w, e),
+                    secondary_text=word,
+                    on_release=lambda inst, w=word, t=translation: self.select_word(t, w),
                 )
             else:
                 item = TwoLineListItem(
-                    text=display_word,
+                    text=word,
                     secondary_text=translation,
-                    on_release=lambda inst, w=display_word, t=translation, e=example: self.select_word(w, t, e),
+                    on_release=lambda inst, w=word, t=translation: self.select_word(w, t),
                 )
             suggestions_list.add_widget(item)
 
-    def select_word(self, word, translation, example=""):
+    def _fuzzy_search(self, prefix):
+        """Ricerca approssimata usata come fallback quando quella per
+        prefisso non trova nulla: prende come candidati tutte le voci che
+        iniziano con la stessa prima lettera (limitandole a un tetto per
+        restare veloce anche su vocabolari enormi), poi le ordina per
+        distanza di edit dal termine digitato e tiene solo quelle abbastanza
+        vicine da essere plausibilmente un typo."""
+        column = "translation" if self.reversed_search else "word"
+        first_letter = prefix[0]
+
+        candidates = self.vocab_con.execute(
+            f"SELECT word, translation FROM vocab WHERE {column} LIKE ? LIMIT ?",
+            (first_letter + "%", TYPO_CANDIDATE_LIMIT),
+        ).fetchall()
+
+        max_distance = 1 if len(prefix) <= 5 else 2
+        scored = []
+        for word, translation in candidates:
+            target = (translation if self.reversed_search else word).lower()
+            distance = _levenshtein(prefix, target[: len(prefix) + 2])
+            if distance <= max_distance:
+                scored.append((distance, word, translation))
+
+        scored.sort(key=lambda row: row[0])
+        return [(w, t) for _, w, t in scored[:15]]
+
+    def select_word(self, word, translation):
         self.current_word = word
         self.current_translation = translation
-        self.current_example = example or ""
 
     # ---------- Aggiunta flashcard ----------
     def add_flashcard(self):
