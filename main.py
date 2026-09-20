@@ -14,15 +14,26 @@ di default cerchi parole tedesche e vedi la traduzione inglese;
 con il pulsante "swap" nella barra in alto cerchi parole inglesi
 e vedi la traduzione tedesca.
 
+Funzioni del mazzo:
+- Ordine di ripasso casuale (shuffle) ad ogni nuova sessione.
+- Niente doppioni: se provi ad aggiungere una coppia fronte/retro gia'
+  presente, l'app mostra un avviso invece di duplicarla.
+- Puoi rimuovere singole flashcard dal mazzo (icona cestino).
+- Puoi far ripartire il ripasso da capo quando vuoi (icona restart).
+- Sessione di ripasso "con memoria": se chiudi l'app a meta' ripasso e la
+  riapri entro poche ore, riprendi da dove avevi lasciato (stesse carte,
+  stesso ordine) invece di rifare tutto da capo. Oltre quella finestra di
+  tempo, la sessione scade e al prossimo ingresso si ricostruisce una coda
+  nuova (mescolata) dalle carte effettivamente scadute in quel momento.
+
 Note sulle prestazioni:
 - Le connessioni SQLite (vocab e mazzo) vengono aperte UNA volta sola
   all'avvio e riutilizzate, invece di aprirle e chiuderle ad ogni ricerca.
 - La ricerca usa un piccolo "debounce": aspetta ~180ms dopo l'ultimo
   tasto premuto prima di interrogare il database e ricostruire la lista,
   cosi' digitare veloce non genera una query/redraw per ogni lettera.
-- Viene creato (una sola volta) un indice anche sulla colonna translation,
-  cosi' la ricerca inversa (inglese -> tedesco) resta rapida quanto quella
-  originale.
+- Vengono creati indici sia su word che su translation, cosi' entrambe le
+  direzioni di ricerca restano rapide anche con vocabolari molto grandi.
 
 Prima del primo avvio, importa un vocabolario CSV con:
     python import_vocab.py --csv dizionario.csv --col-word word --col-translation translation
@@ -31,9 +42,10 @@ Poi avvia l'app (funziona anche su desktop per svilupparla/testarla):
     python main.py
 """
 
+import random
 import shutil
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from kivy.clock import Clock
@@ -41,7 +53,8 @@ from kivy.lang import Builder
 from kivy.properties import StringProperty, BooleanProperty
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
-from kivymd.uix.list import TwoLineListItem
+from kivymd.uix.list import TwoLineListItem, TwoLineRightIconListItem, IconRightWidget
+from kivymd.uix.snackbar import Snackbar
 
 # Cartella dove si trova main.py: qui viene bundlato il vocab.db "di fabbrica"
 # generato con import_vocab.py, sia sul desktop che dentro l'APK. Qui vive
@@ -57,6 +70,10 @@ SPLASH_DURATION_SECONDS = 8.0
 
 DE_HINT = "Search a German word..."
 EN_HINT = "Search an English word..."
+
+# Entro quante ore dall'ultima interazione una sessione di ripasso viene
+# ripresa da dove era rimasta, invece di essere ricostruita da zero.
+REVIEW_SESSION_TIMEOUT_HOURS = 6
 
 KV = """
 ScreenManager:
@@ -150,6 +167,13 @@ ScreenManager:
                 halign: "center"
                 theme_text_color: "Primary"
                 font_style: "H6"
+            MDLabel:
+                id: example_label
+                text: app.current_example
+                halign: "center"
+                theme_text_color: "Secondary"
+                font_style: "Body2"
+                italic: True
 
         MDRaisedButton:
             text: "+ Add flashcard (front + reverse)"
@@ -189,6 +213,7 @@ ScreenManager:
         MDTopAppBar:
             title: "Ripasso"
             left_action_items: [["arrow-left", lambda x: app.go_to_search()]]
+            right_action_items: [["restart", lambda x: app.restart_review()]]
 
         MDLabel:
             id: review_status_label
@@ -269,6 +294,7 @@ class ReviewScreen(MDScreen):
 
 class FlashcardApp(MDApp):
     current_translation = StringProperty("")
+    current_example = StringProperty("")
     current_word = StringProperty("")
     status_text = StringProperty("")
 
@@ -307,9 +333,9 @@ class FlashcardApp(MDApp):
         self.vocab_con = sqlite3.connect(str(self.vocab_db_path), check_same_thread=False)
         self.deck_con = sqlite3.connect(str(self.deck_db_path), check_same_thread=False)
 
-        # Indice anche sulla traduzione, cosi' la ricerca inversa (EN -> DE)
-        # resta rapida quanto quella originale. Viene creato una sola volta:
-        # se esiste gia' (avvii successivi) l'operazione e' istantanea.
+        # Indici sia su word che su translation, cosi' entrambe le direzioni
+        # di ricerca restano rapide. Vengono creati una sola volta: se
+        # esistono gia' (avvii successivi) l'operazione e' istantanea.
         self.vocab_con.execute(
             "CREATE INDEX IF NOT EXISTS idx_translation ON vocab (translation COLLATE NOCASE)"
         )
@@ -361,6 +387,22 @@ class FlashcardApp(MDApp):
         for col, stmt in migrations.items():
             if col not in existing_cols:
                 con.execute(stmt)
+
+        # Indice per controllare velocemente i doppioni (stessa coppia
+        # fronte/retro) prima di inserire una nuova flashcard.
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deck_front_back ON deck (front, back)"
+        )
+
+        # Tabella a riga singola che tiene lo stato della sessione di
+        # ripasso in corso, per poterla riprendere se l'app viene chiusa
+        # e riaperta entro REVIEW_SESSION_TIMEOUT_HOURS.
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS review_session ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), "
+            "queue_ids TEXT, "
+            "updated_at TEXT)"
+        )
         con.commit()
 
     # ---------- Switch direzione di ricerca ----------
@@ -391,6 +433,7 @@ class FlashcardApp(MDApp):
         suggestions_list.clear_widgets()
         self.current_word = ""
         self.current_translation = ""
+        self.current_example = ""
 
         prefix = text.strip().lower()
         if not prefix:
@@ -400,37 +443,40 @@ class FlashcardApp(MDApp):
             # Cerca per prefisso nella colonna translation (inglese) e mostra
             # la parola tedesca corrispondente.
             cur = self.vocab_con.execute(
-                "SELECT word, translation FROM vocab WHERE translation LIKE ? "
+                "SELECT word, translation, gender, example FROM vocab WHERE translation LIKE ? "
                 "ORDER BY translation LIMIT 15",
                 (prefix + "%",),
             )
         else:
             cur = self.vocab_con.execute(
-                "SELECT word, translation FROM vocab WHERE word LIKE ? ORDER BY word LIMIT 15",
+                "SELECT word, translation, gender, example FROM vocab WHERE word LIKE ? "
+                "ORDER BY word LIMIT 15",
                 (prefix + "%",),
             )
         rows = cur.fetchall()
 
-        for word, translation in rows:
+        for word, translation, gender, example in rows:
+            display_word = f"{gender} {word}" if gender else word
             if self.reversed_search:
                 # In modalita' invertita il termine cercato (inglese) va in
                 # primo piano nella lista, la parola tedesca come sottotitolo.
                 item = TwoLineListItem(
                     text=translation,
-                    secondary_text=word,
-                    on_release=lambda inst, w=word, t=translation: self.select_word(t, w),
+                    secondary_text=display_word,
+                    on_release=lambda inst, w=display_word, t=translation, e=example: self.select_word(t, w, e),
                 )
             else:
                 item = TwoLineListItem(
-                    text=word,
+                    text=display_word,
                     secondary_text=translation,
-                    on_release=lambda inst, w=word, t=translation: self.select_word(w, t),
+                    on_release=lambda inst, w=display_word, t=translation, e=example: self.select_word(w, t, e),
                 )
             suggestions_list.add_widget(item)
 
-    def select_word(self, word, translation):
+    def select_word(self, word, translation, example=""):
         self.current_word = word
         self.current_translation = translation
+        self.current_example = example or ""
 
     # ---------- Aggiunta flashcard ----------
     def add_flashcard(self):
@@ -438,6 +484,16 @@ class FlashcardApp(MDApp):
             return
         front, back = self.current_word, self.current_translation
         con = self.deck_con
+
+        # Evita i doppioni: se questa esatta coppia fronte/retro esiste
+        # gia' nel mazzo, avvisa l'utente invece di duplicarla.
+        already_exists = con.execute(
+            "SELECT 1 FROM deck WHERE front = ? AND back = ? LIMIT 1", (front, back)
+        ).fetchone()
+        if already_exists:
+            Snackbar(text="This flashcard is already in your deck").open()
+            return
+
         con.execute(
             "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, repetitions) "
             "VALUES (?, ?, ?, 0, 2.5, 0)",
@@ -450,6 +506,7 @@ class FlashcardApp(MDApp):
         )
         con.commit()
         self._refresh_deck_count()
+        Snackbar(text="Flashcard added").open()
 
     def _refresh_deck_count(self):
         count = self.deck_con.execute("SELECT COUNT(*) FROM deck").fetchone()[0]
@@ -471,24 +528,92 @@ class FlashcardApp(MDApp):
     def _populate_deck_screen(self):
         deck_list = self.root.get_screen("deck").ids.deck_list
         deck_list.clear_widgets()
-        rows = self.deck_con.execute("SELECT front, back FROM deck ORDER BY id DESC").fetchall()
-        for front, back in rows:
-            deck_list.add_widget(TwoLineListItem(text=front, secondary_text=back))
+        rows = self.deck_con.execute("SELECT id, front, back FROM deck ORDER BY id DESC").fetchall()
+        for card_id, front, back in rows:
+            item = TwoLineRightIconListItem(text=front, secondary_text=back)
+            delete_icon = IconRightWidget(icon="trash-can-outline")
+            delete_icon.bind(
+                on_release=lambda inst, cid=card_id: self.delete_flashcard(cid)
+            )
+            item.add_widget(delete_icon)
+            deck_list.add_widget(item)
+
+    def delete_flashcard(self, card_id):
+        self.deck_con.execute("DELETE FROM deck WHERE id = ?", (card_id,))
+        self.deck_con.commit()
+        self._refresh_deck_count()
+        self._populate_deck_screen()
 
     # ---------- Ripasso a ripetizione spaziata ----------
-    def _load_review_queue(self):
-        rows = self.deck_con.execute(
-            "SELECT id, front, back, interval_days, ease_factor, repetitions "
-            "FROM deck WHERE due_date <= ? ORDER BY due_date ASC, id ASC",
-            (TODAY,),
-        ).fetchall()
+    def _load_review_queue(self, force_restart=False):
+        resumed_ids = None if force_restart else self._load_saved_session()
+
+        if resumed_ids:
+            placeholders = ",".join("?" * len(resumed_ids))
+            rows = self.deck_con.execute(
+                "SELECT id, front, back, interval_days, ease_factor, repetitions "
+                f"FROM deck WHERE id IN ({placeholders})",
+                resumed_ids,
+            ).fetchall()
+            rows_by_id = {r[0]: r for r in rows}
+            # Mantiene l'ordine (gia' mescolato) della sessione salvata.
+            ordered_rows = [rows_by_id[i] for i in resumed_ids if i in rows_by_id]
+        else:
+            rows = self.deck_con.execute(
+                "SELECT id, front, back, interval_days, ease_factor, repetitions "
+                "FROM deck WHERE due_date <= ? ORDER BY due_date ASC, id ASC",
+                (TODAY,),
+            ).fetchall()
+            ordered_rows = list(rows)
+            random.shuffle(ordered_rows)  # ordine casuale ad ogni nuova sessione
+
         self.review_queue = [
             {
                 "id": r[0], "front": r[1], "back": r[2],
                 "interval_days": r[3], "ease_factor": r[4], "repetitions": r[5],
             }
-            for r in rows
+            for r in ordered_rows
         ]
+        self._save_review_session()
+
+    def _load_saved_session(self):
+        row = self.deck_con.execute(
+            "SELECT queue_ids, updated_at FROM review_session WHERE id = 1"
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        queue_ids_str, updated_at = row
+        try:
+            last_update = datetime.fromisoformat(updated_at)
+        except (TypeError, ValueError):
+            return None
+        if datetime.now() - last_update > timedelta(hours=REVIEW_SESSION_TIMEOUT_HOURS):
+            return None
+        ids = [int(x) for x in queue_ids_str.split(",") if x]
+        return ids or None
+
+    def _save_review_session(self):
+        ids_str = ",".join(str(card["id"]) for card in self.review_queue)
+        now = datetime.now().isoformat()
+        self.deck_con.execute(
+            "INSERT INTO review_session (id, queue_ids, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET queue_ids = excluded.queue_ids, "
+            "updated_at = excluded.updated_at",
+            (ids_str, now),
+        )
+        self.deck_con.commit()
+
+    def _clear_review_session(self):
+        self.deck_con.execute("DELETE FROM review_session WHERE id = 1")
+        self.deck_con.commit()
+
+    def restart_review(self):
+        """Fa ripartire il ripasso da capo su richiesta esplicita
+        dell'utente, ignorando la sessione salvata."""
+        self._clear_review_session()
+        self._load_review_queue(force_restart=True)
+        self._show_next_review_card()
+        Snackbar(text="Review restarted").open()
 
     def _show_next_review_card(self):
         self.answer_revealed = False
@@ -498,6 +623,7 @@ class FlashcardApp(MDApp):
             self.current_card_front = ""
             self.current_card_back = ""
             self.review_status_text = "Nessuna carta da ripassare oggi! 🎉"
+            self._clear_review_session()
             return
 
         card = self.review_queue[0]
@@ -549,6 +675,7 @@ class FlashcardApp(MDApp):
         )
         self.deck_con.commit()
 
+        self._save_review_session()
         self._show_next_review_card()
 
 
