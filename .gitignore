@@ -1,0 +1,8 @@
+venv/
+.venv/
+__pycache__/
+.buildozer/
+bin/
+*.bz2
+*.jsonl
+*.log
