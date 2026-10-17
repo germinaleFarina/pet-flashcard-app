@@ -242,6 +242,11 @@ class VocabSearcher:
     def column(reversed_search):
         return "translation_norm" if reversed_search else "word_norm"
 
+    def reset(self):
+        """Da chiamare quando il contenuto di vocab cambia (es. voce
+        personale aggiunta): l'elenco per i refusi verra' ricostruito."""
+        self._fuzzy.clear()
+
     def warm_up(self, reversed_search=False):
         """Costruisce in anticipo l'indice per i refusi (pensato per essere
         chiamato mentre l'utente guarda la schermata iniziale)."""
