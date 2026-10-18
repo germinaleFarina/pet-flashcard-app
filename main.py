@@ -118,7 +118,7 @@ from vocab_search import VocabSearcher
 # generato con import_vocab.py, sia sul desktop che dentro l'APK. Qui vive
 # anche icon.png, usato sia come icona dell'app (in buildozer.spec) sia come
 # logo mostrato nella schermata di avvio.
-APP_DIR = Path(__file__).parent
+APP_DIR = Path(__file__).resolve().parent  # sempre assoluto (su Android __file__ e' relativo)
 BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 
 TODAY = date.today().isoformat()
@@ -157,14 +157,17 @@ GENDER_LABELS = {
 def _db_version(path):
     """Legge PRAGMA user_version di un database SQLite (0 se non leggibile).
     import_vocab.py lo imposta ad ogni importazione: serve all'app per capire
-    se il vocab.db incluso nell'app e' piu' recente della copia locale."""
+    se il vocab.db incluso nell'app e' piu' recente della copia locale.
+    Non deve MAI far fallire l'avvio: qualunque problema vale come versione 0.
+    (Nessun indirizzo file:// qui: con un percorso relativo, come su Android,
+    Path.as_uri() solleva ValueError.)"""
     try:
-        con = sqlite3.connect(f"{Path(path).as_uri()}?mode=ro", uri=True)
+        con = sqlite3.connect(str(path))
         try:
             return con.execute("PRAGMA user_version").fetchone()[0]
         finally:
             con.close()
-    except sqlite3.Error:
+    except Exception:  # noqa: BLE001
         return 0
 
 
