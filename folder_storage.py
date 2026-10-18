@@ -23,10 +23,28 @@ Le specifiche salvate nelle impostazioni hanno la forma:
 
 import os
 from pathlib import Path
+from urllib.parse import unquote
 
 
 class StorageError(Exception):
     pass
+
+
+def describe_spec(spec):
+    """Nome leggibile della cartella a partire dalla specifica salvata,
+    SENZA interpellare Android (sicuro da chiamare all'avvio).
+    'android:content://...tree/primary%3ADocuments%2FDigiVol' -> 'Documents/DigiVol'"""
+    if not spec:
+        return ""
+    if spec.startswith("dir:"):
+        return spec[4:]
+    if spec.startswith("android:"):
+        tail = unquote(spec[8:].rsplit("/tree/", 1)[-1])
+        if ":" in tail:
+            volume, path = tail.split(":", 1)
+            return path or volume
+        return tail
+    return spec
 
 
 class FolderStorage:
@@ -62,16 +80,26 @@ class FolderStorage:
 class AndroidTreeStorage:
     """Cartella scelta dall'utente (URI 'tree' del Storage Access Framework)."""
 
-    def __init__(self, tree_uri):
+    def __init__(self, tree_uri, trace=None):
+        # trace(testo): chiamata PRIMA di ogni passo che tocca Android. L'app
+        # la usa per annotare su file il passo in corso: se Android chiude
+        # l'app proprio li', al riavvio si sa quale chiamata era.
+        self._trace = trace or (lambda step: None)
         try:
+            self._trace("open folder: load Java classes")
             from jnius import autoclass
 
             self._Uri = autoclass("android.net.Uri")
             self._DocumentsContract = autoclass("android.provider.DocumentsContract")
             self._Document = autoclass("android.provider.DocumentsContract$Document")
+            self._BufferedReader = autoclass("java.io.BufferedReader")
+            self._InputStreamReader = autoclass("java.io.InputStreamReader")
+            self._OutputStreamWriter = autoclass("java.io.OutputStreamWriter")
+            self._JString = autoclass("java.lang.String")
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
             self._resolver = activity.getContentResolver()
             self._tree_uri_text = tree_uri
+            self._trace("open folder: parse the folder address")
             self._tree = self._Uri.parse(tree_uri)
             self._tree_doc_id = self._DocumentsContract.getTreeDocumentId(self._tree)
             self._dir_uri = self._DocumentsContract.buildDocumentUriUsingTree(
@@ -81,14 +109,10 @@ class AndroidTreeStorage:
             raise StorageError(f"cannot open the selected folder: {exc}") from exc
 
     def describe(self):
-        # "primary:Documents/DigiVol" -> "Documents/DigiVol"
-        try:
-            doc_id = str(self._tree_doc_id)
-            return doc_id.split(":", 1)[1] if ":" in doc_id and doc_id.split(":", 1)[1] else doc_id
-        except Exception:  # noqa: BLE001
-            return self._tree_uri_text
+        return describe_spec("android:" + self._tree_uri_text)
 
     def _find(self, name):
+        self._trace(f"look for {name} in the folder")
         children = self._DocumentsContract.buildChildDocumentsUriUsingTree(
             self._tree, self._tree_doc_id
         )
@@ -114,9 +138,25 @@ class AndroidTreeStorage:
             uri = self._find(name)
             if uri is None:
                 return None
-            descriptor = self._resolver.openFileDescriptor(uri, "r")
-            with os.fdopen(descriptor.detachFd(), "rb") as handle:
-                return handle.read().decode("utf-8-sig")
+            # Flussi Java normali (nessun passaggio di descrittori di file
+            # tra Java e Python, che su Android recente puo' far abortire
+            # il processo se la proprieta' del descrittore non e' perfetta).
+            self._trace(f"read {name}: open stream")
+            stream = self._resolver.openInputStream(uri)
+            if stream is None:
+                raise StorageError(f"cannot open {name}")
+            try:
+                self._trace(f"read {name}: read lines")
+                reader = self._BufferedReader(self._InputStreamReader(stream, "UTF-8"))
+                lines = []
+                while True:
+                    line = reader.readLine()
+                    if line is None:
+                        break
+                    lines.append(line)
+            finally:
+                stream.close()
+            return ("\n".join(lines) + "\n").lstrip("\ufeff") if lines else ""
         except StorageError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -126,14 +166,24 @@ class AndroidTreeStorage:
         try:
             uri = self._find(name)
             if uri is None:
+                self._trace(f"write {name}: create the file")
                 uri = self._DocumentsContract.createDocument(
                     self._resolver, self._dir_uri, "text/plain", name
                 )
                 if uri is None:
                     raise StorageError(f"cannot create {name} in this folder")
-            descriptor = self._resolver.openFileDescriptor(uri, "wt")  # scrive e svuota
-            with os.fdopen(descriptor.detachFd(), "wb") as handle:
-                handle.write(text.encode("utf-8"))
+            self._trace(f"write {name}: open stream")
+            stream = self._resolver.openOutputStream(uri, "wt")  # scrive e svuota
+            if stream is None:
+                raise StorageError(f"cannot open {name} for writing")
+            try:
+                self._trace(f"write {name}: write text")
+                writer = self._OutputStreamWriter(stream, "UTF-8")
+                writer.write(self._JString(text))
+                writer.flush()
+                self._trace(f"write {name}: close stream")
+            finally:
+                stream.close()
         except StorageError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -176,11 +226,11 @@ def pick_folder_android(on_result):
     PythonActivity.mActivity.startActivityForResult(intent, request_code)
 
 
-def open_storage(spec):
+def open_storage(spec, trace=None):
     """Ricostruisce lo storage a partire dalla specifica salvata nelle
     impostazioni ('dir:...' oppure 'android:...')."""
     if spec.startswith("dir:"):
         return FolderStorage(spec[4:])
     if spec.startswith("android:"):
-        return AndroidTreeStorage(spec[8:])
+        return AndroidTreeStorage(spec[8:], trace=trace)
     raise StorageError("unknown backup location")

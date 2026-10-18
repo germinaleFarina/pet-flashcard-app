@@ -4,7 +4,8 @@ userdata.py - i dati dell'utente (nessuna dipendenza da Kivy).
 Tre tipi di dati, tutti salvati nel database dell'app (deck.db) e copiati
 come FILE DI TESTO nella cartella di backup scelta dall'utente:
 
-    digivol_deck.txt         il mazzo di flashcard (con i progressi di ripasso)
+    digivol_deck.txt         le flashcard, con i progressi di ripasso e i mazzi
+                             per categoria in cui sono organizzate
     digivol_my_entries.txt   le voci aggiunte dall'utente al vocabolario
     digivol_corrections.txt  le correzioni segnalate (da inviare agli sviluppatori)
 
@@ -58,6 +59,11 @@ MAX_WORD_LENGTH = 200
 MAX_TRANSLATION_LENGTH = 1000
 MAX_NOTE_LENGTH = 1000
 
+# Il mazzo "Default" e' sempre presente: e' dove vanno le carte che non sono
+# state assegnate a nessuna categoria (nel database: category_id NULL).
+DEFAULT_DECK_NAME = "Default"
+MAX_DECK_NAME_LENGTH = 40
+
 
 # ---------------------------------------------------------------------------
 # Tabelle (solo "IF NOT EXISTS": un aggiornamento non puo' cancellare nulla)
@@ -81,6 +87,19 @@ def init_user_tables(con):
     con.execute(
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
     )
+    # Mazzi per categoria. Il nome e' unico senza distinguere maiuscole.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS categories ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL UNIQUE COLLATE NOCASE, created TEXT NOT NULL)"
+    )
+    # La tabella delle carte (deck) ottiene la colonna category_id: NULL =
+    # mazzo Default. Solo aggiunta di colonne, mai cancellazioni.
+    deck_cols = {row[1] for row in con.execute("PRAGMA table_info(deck)")}
+    if deck_cols:
+        if "category_id" not in deck_cols:
+            con.execute("ALTER TABLE deck ADD COLUMN category_id INTEGER")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_deck_category ON deck (category_id)")
     con.commit()
 
 
@@ -127,13 +146,20 @@ def _dumps(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
-def _header(kind):
-    return _dumps({"digivol": kind, "version": FORMAT_VERSION})
+def _header(kind, **extra):
+    return _dumps({"digivol": kind, "version": FORMAT_VERSION, **extra})
 
 
 def parse_records(text, kind):
     """-> (lista di record, numero di righe non valide).
     ValueError se il file non e' un file DigiVol del tipo atteso."""
+    _head, records, bad = parse_file(text, kind)
+    return records, bad
+
+
+def parse_file(text, kind):
+    """-> (intestazione, record, righe non valide). ValueError se il file
+    non e' un file DigiVol del tipo atteso."""
     lines = [ln.strip() for ln in text.lstrip("\ufeff").splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     if not lines:
@@ -157,7 +183,7 @@ def parse_records(text, kind):
             records.append(rec)
         else:
             bad += 1
-    return records, bad
+    return head, records, bad
 
 
 def _as_int(value, default, lo, hi):
@@ -186,24 +212,33 @@ def _as_date(value):
 # ---------------------------------------------------------------------------
 
 def export_deck_text(con):
+    names = [r[0] for r in con.execute("SELECT name FROM categories ORDER BY id")]
     rows = con.execute(
-        "SELECT front, back, due_date, interval_days, ease_factor, repetitions "
-        "FROM deck ORDER BY id"
+        "SELECT d.front, d.back, d.due_date, d.interval_days, d.ease_factor, "
+        "d.repetitions, c.name FROM deck d "
+        "LEFT JOIN categories c ON d.category_id = c.id ORDER BY d.id"
     ).fetchall()
-    lines = [_header("deck")]
-    for front, back, due, interval, ease, reps in rows:
-        lines.append(_dumps({
-            "front": front, "back": back, "due": due,
-            "interval": interval, "ease": ease, "reps": reps,
-        }))
+    lines = [_header("deck", decks=names)]
+    for front, back, due, interval, ease, reps, deck in rows:
+        rec = {"front": front, "back": back, "due": due,
+               "interval": interval, "ease": ease, "reps": reps}
+        if deck:                      # le carte del mazzo Default non hanno il campo
+            rec["deck"] = deck
+        lines.append(_dumps(rec))
     return "\n".join(lines) + "\n"
 
 
 def merge_deck_text(con, text):
     """Aggiunge al mazzo le carte del file che non ci sono ancora (stessa
-    coppia fronte/retro = stessa carta, si tiene quella gia' presente).
+    coppia fronte/retro = stessa carta, si tiene quella gia' presente, con il
+    suo mazzo). I mazzi per categoria mancanti vengono ricreati.
     -> (aggiunte, gia_presenti, righe_non_valide)"""
-    records, bad = parse_records(text, "deck")
+    head, records, bad = parse_file(text, "deck")
+    listed = head.get("decks")
+    if isinstance(listed, list):
+        for name in listed:
+            if isinstance(name, str):
+                get_or_create_deck(con, name)
     added = skipped = 0
     for rec in records:
         front = clean_text(rec.get("front"), 2000)
@@ -216,17 +251,110 @@ def merge_deck_text(con, text):
         ).fetchone():
             skipped += 1
             continue
+        deck_name_in_file = rec.get("deck")
+        category_id = (get_or_create_deck(con, deck_name_in_file)
+                       if isinstance(deck_name_in_file, str) else None)
         con.execute(
-            "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, repetitions) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, "
+            "repetitions, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (front, back, _as_date(rec.get("due")),
              _as_int(rec.get("interval"), 0, 0, 36500),
              _as_float(rec.get("ease"), 2.5, 1.3, 5.0),
-             _as_int(rec.get("reps"), 0, 0, 100000)),
+             _as_int(rec.get("reps"), 0, 0, 100000),
+             category_id),
         )
         added += 1
     con.commit()
     return added, skipped, bad
+
+
+# ---------------------------------------------------------------------------
+# Mazzi per categoria
+# ---------------------------------------------------------------------------
+
+def clean_deck_name(name):
+    cleaned = clean_text(name, MAX_DECK_NAME_LENGTH)
+    if not cleaned:
+        raise ValueError("Please type a name for the deck.")
+    if cleaned.lower() == DEFAULT_DECK_NAME.lower():
+        raise ValueError(f'"{DEFAULT_DECK_NAME}" is the built-in deck.')
+    return cleaned
+
+
+def find_deck_id(con, name):
+    row = con.execute("SELECT id FROM categories WHERE name = ?", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def create_deck(con, name):
+    """Crea un mazzo per categoria. -> id. ValueError se il nome non va bene
+    o esiste gia'."""
+    cleaned = clean_deck_name(name)
+    if find_deck_id(con, cleaned) is not None:
+        raise ValueError(f'A deck named "{cleaned}" already exists.')
+    cur = con.execute(
+        "INSERT INTO categories (name, created) VALUES (?, ?)", (cleaned, _now())
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def get_or_create_deck(con, name):
+    """id del mazzo con quel nome (lo crea se manca); None = mazzo Default."""
+    try:
+        cleaned = clean_deck_name(name)
+    except ValueError:
+        return None
+    existing = find_deck_id(con, cleaned)
+    return existing if existing is not None else create_deck(con, cleaned)
+
+
+def deck_exists(con, deck_id):
+    return con.execute("SELECT 1 FROM categories WHERE id = ?", (deck_id,)).fetchone() is not None
+
+
+def deck_name(con, deck_id):
+    if deck_id is None:
+        return DEFAULT_DECK_NAME
+    row = con.execute("SELECT name FROM categories WHERE id = ?", (deck_id,)).fetchone()
+    return row[0] if row else DEFAULT_DECK_NAME
+
+
+def list_decks(con):
+    """[{'id': None, 'name': 'Default', 'count': n}, {'id': 3, ...}, ...]:
+    Default per primo, poi le categorie in ordine alfabetico."""
+    counts = dict(con.execute("SELECT category_id, COUNT(*) FROM deck GROUP BY category_id"))
+    decks = [{"id": None, "name": DEFAULT_DECK_NAME, "count": counts.get(None, 0)}]
+    for cid, name in con.execute("SELECT id, name FROM categories ORDER BY name COLLATE NOCASE"):
+        decks.append({"id": cid, "name": name, "count": counts.get(cid, 0)})
+    return decks
+
+
+def delete_deck(con, deck_id):
+    """Elimina un mazzo per categoria. Le sue carte NON vengono cancellate:
+    tornano nel mazzo Default. -> numero di carte spostate."""
+    moved = con.execute(
+        "UPDATE deck SET category_id = NULL WHERE category_id = ?", (deck_id,)
+    ).rowcount
+    con.execute("DELETE FROM categories WHERE id = ?", (deck_id,))
+    con.commit()
+    return moved
+
+
+def move_cards(con, card_ids, deck_id):
+    """Sposta le carte indicate nel mazzo deck_id (None = Default).
+    -> numero di carte spostate."""
+    ids = [int(i) for i in card_ids]
+    moved = 0
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        moved += con.execute(
+            f"UPDATE deck SET category_id = ? WHERE id IN ({placeholders})",
+            [deck_id, *chunk],
+        ).rowcount
+    con.commit()
+    return moved
 
 
 # ---------------------------------------------------------------------------

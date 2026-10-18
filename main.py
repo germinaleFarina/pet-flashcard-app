@@ -64,6 +64,18 @@ Backup, voci personali e correzioni (icona "backup-restore" in alto):
 - "Add my entry": aggiunge una voce personale al vocabolario (subito
   ricercabile, anche con i refusi).
 - Tutto e' salvato anche dentro l'app: la cartella e' una copia in piu'.
+- La cartella viene aperta solo quando serve (mai all'avvio) e ogni accesso e'
+  protetto: prima di ogni chiamata ad Android l'app annota su file il passo
+  in corso. Se Android chiudesse l'app proprio li', al riavvio il backup
+  automatico resta in pausa invece di far richiudere l'app, e il rapporto
+  diagnostico (Backup & data) dice quale passo era in corso.
+
+Mazzi per categoria:
+- Ogni flashcard sta in un mazzo: "Default" oppure una categoria creata
+  dall'utente. Il pulsante "Deck: ..." nella ricerca sceglie dove vanno le
+  nuove carte. Nella lista delle carte si puo' filtrare per mazzo e, con la
+  modalita' selezione, spostare piu' carte in un colpo solo in un mazzo.
+  I mazzi fanno parte del backup. Il ripasso, per ora, include tutti i mazzi.
 
 Prima del primo avvio, genera vocab.db dal CSV con:
     python import_vocab.py --csv vocabolario_finale.csv
@@ -72,9 +84,12 @@ Poi avvia l'app (funziona anche su desktop per svilupparla/testarla):
     python main.py
 """
 
+import os
 import random
 import shutil
 import sqlite3
+import sys
+import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -85,8 +100,11 @@ from kivy.properties import StringProperty, BooleanProperty
 from kivy.utils import platform
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
+from kivymd.uix.button import MDFlatButton, MDRaisedButton
+from kivymd.uix.dialog import MDDialog
 from kivymd.uix.list import (
-    OneLineListItem, TwoLineListItem, TwoLineRightIconListItem, IconRightWidget,
+    IconLeftWidgetWithoutTouch, IconRightWidget, OneLineListItem,
+    TwoLineAvatarIconListItem, TwoLineListItem, TwoLineRightIconListItem,
 )
 
 import folder_storage
@@ -166,6 +184,7 @@ ScreenManager:
     ReviewScreen:
     FormScreen:
     DataScreen:
+    DecksScreen:
 
 <SplashScreen>:
     name: "splash"
@@ -227,7 +246,7 @@ ScreenManager:
 
         MDTopAppBar:
             title: "DigiVol"
-            right_action_items: [["swap-horizontal", lambda x: app.toggle_search_direction()], ["school-outline", lambda x: app.go_to_review()], ["cards-outline", lambda x: app.go_to_deck()], ["backup-restore", lambda x: app.go_to_data()]]
+            right_action_items: [["swap-horizontal", lambda x: app.toggle_search_direction()], ["school-outline", lambda x: app.go_to_review()], ["cards-outline", lambda x: app.go_to_deck()], ["folder-sync-outline", lambda x: app.go_to_data()]]
 
         MDTextField:
             id: search_field
@@ -267,11 +286,19 @@ ScreenManager:
                     text_size: self.width, None
                     height: self.texture_size[1]
 
-        MDRaisedButton:
-            text: "+ Add flashcard (front + reverse)"
-            pos_hint: {"center_x": 0.5}
-            disabled: not app.current_word
-            on_release: app.add_flashcard()
+        MDBoxLayout:
+            size_hint_y: None
+            height: "48dp"
+            spacing: "8dp"
+            Widget:
+            MDRaisedButton:
+                text: "+ Add flashcard"
+                disabled: not app.current_word
+                on_release: app.add_flashcard()
+            MDFlatButton:
+                text: "Deck: " + app.target_deck_label
+                on_release: app.open_decks("target")
+            Widget:
 
         MDBoxLayout:
             size_hint_y: None
@@ -399,20 +426,101 @@ ScreenManager:
                     theme_text_color: "Secondary"
                     adaptive_height: True
 
+                MDLabel:
+                    text: "Diagnostics"
+                    font_style: "Subtitle2"
+                    adaptive_height: True
+
+                MDLabel:
+                    text: app.diagnostics_text[:700] if app.diagnostics_text else "No problems recorded."
+                    font_style: "Caption"
+                    theme_text_color: "Secondary"
+                    adaptive_height: True
+
+                MDBoxLayout:
+                    adaptive_height: True
+                    spacing: "8dp"
+                    MDFlatButton:
+                        text: "Copy diagnostic report"
+                        on_release: app.copy_diagnostics()
+                    MDFlatButton:
+                        text: "Clear"
+                        on_release: app.clear_diagnostics()
+
 <DeckScreen>:
     name: "deck"
     MDBoxLayout:
         orientation: "vertical"
         padding: "16dp"
-        spacing: "12dp"
+        spacing: "8dp"
 
         MDTopAppBar:
-            title: "Il tuo mazzo"
+            title: app.deck_view_title
             left_action_items: [["arrow-left", lambda x: app.go_to_search()]]
+            right_action_items: [["filter-variant", lambda x: app.open_decks("view")], ["checkbox-multiple-marked-outline", lambda x: app.toggle_select_mode()]]
+
+        MDLabel:
+            text: app.deck_message
+            halign: "center"
+            theme_text_color: "Secondary"
+            font_style: "Caption"
+            adaptive_height: True
 
         ScrollView:
             MDList:
                 id: deck_list
+
+        MDBoxLayout:
+            size_hint_y: None
+            height: "48dp" if app.select_mode else 0
+            opacity: 1 if app.select_mode else 0
+            disabled: not app.select_mode
+            spacing: "8dp"
+            MDFlatButton:
+                text: "Select all"
+                on_release: app.select_all_cards()
+            MDLabel:
+                text: app.selection_text
+                halign: "center"
+                theme_text_color: "Secondary"
+            MDRaisedButton:
+                text: "Move to deck"
+                on_release: app.open_decks("move")
+
+<DecksScreen>:
+    name: "decks"
+    MDBoxLayout:
+        orientation: "vertical"
+
+        MDTopAppBar:
+            title: app.decks_title
+            left_action_items: [["arrow-left", lambda x: app.decks_back()]]
+
+        MDBoxLayout:
+            size_hint_y: None
+            height: "72dp"
+            padding: ["16dp", "8dp"]
+            spacing: "8dp"
+            MDTextField:
+                id: new_deck_name
+                hint_text: "New deck name"
+                mode: "rectangle"
+            MDRaisedButton:
+                text: "Create"
+                pos_hint: {"center_y": 0.5}
+                on_release: app.create_deck_from_field()
+
+        MDLabel:
+            text: app.decks_message
+            halign: "center"
+            theme_text_color: "Secondary"
+            font_style: "Caption"
+            size_hint_y: None
+            height: self.texture_size[1] + dp(8)
+
+        ScrollView:
+            MDList:
+                id: decks_list
 
 <ReviewScreen>:
     name: "review"
@@ -511,6 +619,10 @@ class DataScreen(MDScreen):
     pass
 
 
+class DecksScreen(MDScreen):
+    pass
+
+
 class FlashcardApp(MDApp):
     current_translation = StringProperty("")
     current_word = StringProperty("")
@@ -544,7 +656,29 @@ class FlashcardApp(MDApp):
     backup_status_text = StringProperty("")
     backup_configured = BooleanProperty(False)
 
-    storage = None                 # cartella di backup (None finche' non scelta)
+    diagnostics_text = StringProperty("")
+
+    # ---------- Mazzi per categoria ----------
+    target_deck_label = StringProperty("Default")   # dove vanno le nuove carte
+    decks_title = StringProperty("Decks")
+    decks_message = StringProperty("")
+    decks_mode = StringProperty("target")            # target | move | view
+    deck_view_title = StringProperty("Your cards")
+    deck_message = StringProperty("")
+    select_mode = BooleanProperty(False)
+    selection_text = StringProperty("")
+    target_deck_id = None          # None = mazzo Default
+    _deck_filter = "all"           # "all", None (Default) oppure id categoria
+    _selected_card_ids = None
+    _visible_card_ids = None
+    _select_icons = None
+    _dialog = None
+
+    storage = None                 # cartella di backup, aperta solo quando serve
+    _storage_spec = None           # specifica salvata della cartella
+    _storage_blocked = False       # backup automatico in pausa dopo un crash
+    _guard_path = None
+    _log_path = None
     _selected_row = None           # riga del vocabolario selezionata (dict)
     _form_original = None
     _form_type_idx = 0
@@ -575,6 +709,10 @@ class FlashcardApp(MDApp):
         # che su alcuni dispositivi puo' essere di sola lettura.
         data_dir = Path(self.user_data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._selected_card_ids = set()
+        self._visible_card_ids = []
+        self._select_icons = {}
+        self._setup_diagnostics(data_dir)
         self.vocab_db_path = data_dir / "vocab.db"
         self.deck_db_path = data_dir / "deck.db"
 
@@ -620,6 +758,7 @@ class FlashcardApp(MDApp):
 
         self.searcher = VocabSearcher(self.vocab_con)
         self._init_backup_storage()
+        self._load_target_deck()
         self.root = Builder.load_string(KV)
         self._refresh_deck_count()
 
@@ -640,7 +779,10 @@ class FlashcardApp(MDApp):
         return True
 
     def on_stop(self):
-        self._autosave_deck()
+        # Su Android il backup e' gia' stato fatto in on_pause: durante la
+        # chiusura non si toccano piu' le API Java.
+        if platform != "android":
+            self._autosave_deck()
         # Chiude in modo pulito le connessioni persistenti quando l'app termina.
         for con in (getattr(self, "vocab_con", None), getattr(self, "deck_con", None)):
             if con is not None:
@@ -894,7 +1036,9 @@ class FlashcardApp(MDApp):
             )
         self._flash_status(
             message + (" and saved to your backup folder" if in_folder
-                       else ". Choose a backup folder (cloud icon) to also get the text file"),
+                       else ". Backup is paused: see the folder icon at the top"
+                       if self._storage_blocked and self._storage_spec
+                       else ". Choose a backup folder (folder icon at the top) to also get the text file"),
             duration=4,
         )
 
@@ -904,26 +1048,146 @@ class FlashcardApp(MDApp):
         )
         self.searcher.reset()
 
+    # ---------- Diagnostica e protezione dai crash ----------
+    def _setup_diagnostics(self, data_dir):
+        """Percorsi dei file di diagnostica. Nessun gestore di segnali di
+        sistema viene installato: su Android potrebbe interferire con la
+        macchina virtuale Java."""
+        self._guard_path = data_dir / "storage_guard.txt"
+        self._log_path = data_dir / "backup_log.txt"
+        self._refresh_diagnostics()
+
+    def _read_tail(self, path, size):
+        try:
+            if path is not None and path.exists():
+                return path.read_text(encoding="utf-8", errors="replace")[-size:].strip()
+        except OSError:
+            pass
+        return ""
+
+    def _refresh_diagnostics(self):
+        self.diagnostics_text = self._read_tail(self._log_path, 1500)
+
+    def _log_text(self, message):
+        try:
+            with open(self._log_path, "a", encoding="utf-8") as handle:
+                handle.write(f"[{datetime.now().isoformat(timespec='seconds')}] {message}\n")
+            if self._log_path.stat().st_size > 60000:  # tiene solo la parte finale
+                tail = self._log_path.read_text(encoding="utf-8", errors="replace")[-30000:]
+                self._log_path.write_text(tail, encoding="utf-8")
+        except OSError:
+            pass
+        self._refresh_diagnostics()
+
+    def _log_error(self, where, exc):
+        frames = "".join(traceback.format_exc().splitlines(keepends=True)[-6:])
+        self._log_text(f"{where}: {exc!r}\n{frames}")
+
+    def _diagnostics_report(self):
+        vocab_version = ""
+        try:
+            vocab_version = self.vocab_con.execute("PRAGMA user_version").fetchone()[0]
+        except Exception:  # noqa: BLE001
+            pass
+        header = (
+            f"DigiVol diagnostic report\nplatform: {platform}\n"
+            f"python: {sys.version.split()[0]}\nvocab version: {vocab_version}\n"
+            f"backup folder: {folder_storage.describe_spec(self._storage_spec) or 'none'}\n"
+            f"automatic backup paused: {self._storage_blocked}\n"
+        )
+        return header + "\n" + self._read_tail(self._log_path, 8000)
+
+    def copy_diagnostics(self):
+        try:
+            from kivy.core.clipboard import Clipboard  # noqa: WPS433
+
+            Clipboard.copy(self._diagnostics_report())
+            self.backup_status_text = "Report copied: paste it into a message to send it."
+        except Exception as exc:  # noqa: BLE001
+            self.backup_status_text = f"Could not copy the report: {exc}"
+
+    def clear_diagnostics(self):
+        try:
+            if self._log_path is not None and self._log_path.exists():
+                self._log_path.unlink()
+        except OSError:
+            pass
+        self._refresh_diagnostics()
+        self.backup_status_text = "Diagnostics cleared."
+
+    def _guard_enter(self, label):
+        """Scrive un segnaposto PRIMA di toccare la cartella e lo toglie
+        DOPO. Se Android chiude l'app a meta', il segnaposto resta e al
+        riavvio il backup automatico viene messo in pausa."""
+        try:
+            with open(self._guard_path, "w", encoding="utf-8") as handle:
+                handle.write(f"{label} at {datetime.now().isoformat(timespec='seconds')}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            pass
+
+    def _guard_exit(self):
+        try:
+            self._guard_path.unlink()
+        except OSError:
+            pass
+
     # ---------- Backup su cartella scelta dall'utente ----------
     def _init_backup_storage(self):
-        spec = userdata.get_setting(self.deck_con, "backup_location")
+        # Nessun accesso ad Android qui: la cartella si apre solo quando serve.
         self.storage = None
-        if spec:
-            try:
-                self.storage = folder_storage.open_storage(spec)
-            except Exception as exc:  # noqa: BLE001
-                self.backup_status_text = f"Backup folder not available: {exc}"
+        self._storage_spec = userdata.get_setting(self.deck_con, "backup_location")
+        self._storage_blocked = userdata.get_setting(self.deck_con, "storage_blocked") == "1"
+        if self._guard_path is not None and self._guard_path.exists():
+            label = self._read_tail(self._guard_path, 200) or "an unknown step"
+            self._storage_blocked = True
+            userdata.set_setting(self.deck_con, "storage_blocked", "1")
+            self._log_text(f"The app was closed while using the backup folder. Last step: {label}")
+            self._guard_exit()
+        if self._storage_blocked and self._storage_spec:
+            self.backup_status_text = (
+                "Automatic backup is paused: the app closed unexpectedly the last time "
+                "it used the backup folder. Tap Back up now to try again."
+            )
         self._update_backup_texts()
 
     def _update_backup_texts(self):
-        self.backup_configured = self.storage is not None
-        if self.storage is None:
+        self.backup_configured = bool(self._storage_spec)
+        if not self._storage_spec:
             self.backup_folder_text = (
                 "No folder chosen yet. Until you choose one, everything is stored "
                 "only inside the app."
             )
         else:
-            self.backup_folder_text = f"Folder: {self.storage.describe()}"
+            self.backup_folder_text = (
+                f"Folder: {folder_storage.describe_spec(self._storage_spec)}"
+            )
+
+    def _open_storage(self):
+        if self.storage is None:
+            self.storage = folder_storage.open_storage(
+                self._storage_spec, trace=self._guard_enter
+            )
+        return self.storage
+
+    def _storage_op(self, label, func, manual=False):
+        """Esegue func(storage) con la protezione anti-crash. manual=True per
+        le azioni volute dall'utente (anche a backup in pausa: se riescono, il
+        backup automatico riparte). Le eccezioni risalgono a chi chiama."""
+        if not self._storage_spec:
+            return None
+        if self._storage_blocked and not manual:
+            return None
+        self._guard_enter(label)
+        try:
+            result = func(self._open_storage())
+        finally:
+            self._guard_exit()
+        if manual and self._storage_blocked:
+            self._storage_blocked = False
+            userdata.set_setting(self.deck_con, "storage_blocked", "0")
+        return result
 
     def go_to_data(self):
         self._update_backup_texts()
@@ -932,8 +1196,13 @@ class FlashcardApp(MDApp):
     def choose_backup_folder(self):
         if platform == "android":
             try:
-                folder_storage.pick_folder_android(self._on_folder_picked)
+                self._guard_enter("open the folder picker")
+                try:
+                    folder_storage.pick_folder_android(self._on_folder_picked)
+                finally:
+                    self._guard_exit()
             except Exception as exc:  # noqa: BLE001
+                self._log_error("folder picker", exc)
                 self.backup_status_text = f"Could not open the folder picker: {exc}"
         else:
             # Sul desktop (solo per provare l'app) si usa la cartella ~/DigiVol.
@@ -948,18 +1217,15 @@ class FlashcardApp(MDApp):
             self.backup_status_text = "No folder selected."
 
     def _activate_storage(self, spec):
-        try:
-            storage = folder_storage.open_storage(spec)
-        except Exception as exc:  # noqa: BLE001
-            self.backup_status_text = f"Cannot use this folder: {exc}"
-            return
-        self.storage = storage
+        self._storage_spec = spec
+        self.storage = None
         userdata.set_setting(self.deck_con, "backup_location", spec)
         self._update_backup_texts()
         # Prima legge quello che la cartella gia' contiene (utile dopo una
         # reinstallazione), poi scrive i file aggiornati.
         restored = self._do_restore()
         saved = self._do_backup()
+        self._load_target_deck()
         self.backup_status_text = f"{restored}\n{saved}"
 
     def _stamp(self):
@@ -967,9 +1233,14 @@ class FlashcardApp(MDApp):
 
     def _do_restore(self):
         try:
-            rep = userdata.restore_all(self.deck_con, self.storage)
+            rep = self._storage_op(
+                "restore", lambda st: userdata.restore_all(self.deck_con, st), manual=True
+            )
         except Exception as exc:  # noqa: BLE001
+            self._log_error("restore", exc)
             return f"Restore failed: {exc}"
+        if rep is None:
+            return "No backup folder chosen."
         if rep["entries_added"]:
             self._sync_user_entries()
         self._refresh_deck_count()
@@ -992,9 +1263,14 @@ class FlashcardApp(MDApp):
 
     def _do_backup(self):
         try:
-            rep = userdata.backup_all(self.deck_con, self.storage)
+            rep = self._storage_op(
+                "backup", lambda st: userdata.backup_all(self.deck_con, st), manual=True
+            )
         except Exception as exc:  # noqa: BLE001
+            self._log_error("backup", exc)
             return f"Backup failed: {exc}"
+        if rep is None:
+            return "No backup folder chosen."
         if rep["entries_added"]:
             self._sync_user_entries()
         text = f"Backed up at {self._stamp()}."
@@ -1006,31 +1282,34 @@ class FlashcardApp(MDApp):
         return text
 
     def backup_now(self):
-        if self.storage is None:
-            return
-        self.backup_status_text = self._do_backup()
+        if self._storage_spec:
+            self.backup_status_text = self._do_backup()
 
     def restore_from_folder(self):
-        if self.storage is None:
-            return
-        self.backup_status_text = self._do_restore()
+        if self._storage_spec:
+            self.backup_status_text = self._do_restore()
+            self._load_target_deck()
 
     def _backup_extras_quietly(self):
         """Dopo una correzione o una voce nuova: aggiorna i relativi file nella
-        cartella (se scelta). True se i file sono stati scritti."""
-        if self.storage is None:
-            return False
+        cartella (se scelta e se il backup non e' in pausa). True se scritti."""
         try:
-            rep = userdata.backup_extras(self.deck_con, self.storage)
+            rep = self._storage_op(
+                "save corrections and entries",
+                lambda st: userdata.backup_extras(self.deck_con, st),
+            )
         except Exception as exc:  # noqa: BLE001
+            self._log_error("save corrections and entries", exc)
             self.backup_status_text = f"Could not write to the backup folder: {exc}"
+            return False
+        if rep is None:
             return False
         if rep["entries_added"]:
             self._sync_user_entries()
         return not rep["problems"]
 
     def _schedule_autosave(self):
-        if self.storage is None:
+        if not self._storage_spec or self._storage_blocked:
             return
         if self._autosave_event is not None:
             self._autosave_event.cancel()
@@ -1042,12 +1321,17 @@ class FlashcardApp(MDApp):
         if self._autosave_event is not None:
             self._autosave_event.cancel()
             self._autosave_event = None
-        if self.storage is None or getattr(self, "deck_con", None) is None:
+        if (not self._storage_spec or self._storage_blocked
+                or getattr(self, "deck_con", None) is None):
             return
         try:
-            if userdata.backup_deck(self.deck_con, self.storage) == "written":
+            result = self._storage_op(
+                "automatic deck backup", lambda st: userdata.backup_deck(self.deck_con, st)
+            )
+            if result == "written":
                 self.backup_status_text = f"Deck saved to your folder at {self._stamp()}."
         except Exception as exc:  # noqa: BLE001
+            self._log_error("automatic backup", exc)
             self.backup_status_text = f"Automatic backup failed: {exc}"
 
     # ---------- Aggiunta flashcard ----------
@@ -1066,19 +1350,20 @@ class FlashcardApp(MDApp):
             self._flash_status("Already in your deck")
             return
 
-        con.execute(
-            "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, repetitions) "
-            "VALUES (?, ?, ?, 0, 2.5, 0)",
-            (front, back, TODAY),
-        )
-        con.execute(
-            "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, repetitions) "
-            "VALUES (?, ?, ?, 0, 2.5, 0)",
-            (back, front, TODAY),
-        )
+        # Le due carte (fronte->retro e retro->fronte) vanno nel mazzo scelto
+        # con il pulsante "Deck: ..." (Default se non e' stato scelto nulla).
+        for card_front, card_back in ((front, back), (back, front)):
+            con.execute(
+                "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, "
+                "repetitions, category_id) VALUES (?, ?, ?, 0, 2.5, 0, ?)",
+                (card_front, card_back, TODAY, self.target_deck_id),
+            )
         con.commit()
         self._schedule_autosave()
-        self._flash_status("Flashcard added")
+        where = "" if self.target_deck_id is None else (
+            f" to {userdata.deck_name(con, self.target_deck_id)}"
+        )
+        self._flash_status(f"Flashcard added{where} (front + reverse)", duration=2.5)
 
     def _flash_status(self, message, duration=1.5):
         """Mostra un messaggio temporaneo nella label di stato in basso,
@@ -1095,6 +1380,15 @@ class FlashcardApp(MDApp):
 
     # ---------- Navigazione ----------
     def go_to_deck(self):
+        # Ingresso dalla schermata di ricerca: parte sempre da "tutte le carte".
+        self._deck_filter = "all"
+        self.select_mode = False
+        self._selected_card_ids = set()
+        self.selection_text = ""
+        self.deck_message = ""
+        self._show_deck_screen()
+
+    def _show_deck_screen(self):
         self._populate_deck_screen()
         self.root.current = "deck"
 
@@ -1109,22 +1403,223 @@ class FlashcardApp(MDApp):
     def _populate_deck_screen(self):
         deck_list = self.root.get_screen("deck").ids.deck_list
         deck_list.clear_widgets()
-        rows = self.deck_con.execute("SELECT id, front, back FROM deck ORDER BY id DESC").fetchall()
-        for card_id, front, back in rows:
-            item = TwoLineRightIconListItem(text=front, secondary_text=back)
-            delete_icon = IconRightWidget(icon="trash-can-outline")
-            delete_icon.bind(
-                on_release=lambda inst, cid=card_id: self.delete_flashcard(cid)
-            )
-            item.add_widget(delete_icon)
+        flt = self._deck_filter
+        sql = ("SELECT d.id, d.front, d.back, c.name FROM deck d "
+               "LEFT JOIN categories c ON d.category_id = c.id")
+        params = ()
+        if flt is None:
+            sql += " WHERE d.category_id IS NULL"
+        elif flt != "all":
+            sql += " WHERE d.category_id = ?"
+            params = (flt,)
+        rows = self.deck_con.execute(sql + " ORDER BY d.id DESC", params).fetchall()
+
+        self.deck_view_title = (
+            "Your cards" if flt == "all"
+            else f"Cards: {userdata.deck_name(self.deck_con, flt)}"
+        )
+        self._visible_card_ids = [r[0] for r in rows]
+        self._select_icons = {}
+        for card_id, front, back, card_deck in rows:
+            # Nella vista "tutte le carte" indica il mazzo delle carte categorizzate.
+            secondary = back if (card_deck is None or flt != "all") else f"{back}  ·  {card_deck}"
+            if self.select_mode:
+                item = TwoLineAvatarIconListItem(
+                    text=front, secondary_text=secondary,
+                    on_release=lambda inst, cid=card_id: self.toggle_card_selected(cid),
+                )
+                icon = IconLeftWidgetWithoutTouch(
+                    icon="checkbox-marked" if card_id in self._selected_card_ids
+                    else "checkbox-blank-outline"
+                )
+                item.add_widget(icon)
+                self._select_icons[card_id] = icon
+            else:
+                item = TwoLineRightIconListItem(text=front, secondary_text=secondary)
+                delete_icon = IconRightWidget(icon="trash-can-outline")
+                delete_icon.bind(
+                    on_release=lambda inst, cid=card_id: self.delete_flashcard(cid)
+                )
+                item.add_widget(delete_icon)
             deck_list.add_widget(item)
 
     def delete_flashcard(self, card_id):
         self.deck_con.execute("DELETE FROM deck WHERE id = ?", (card_id,))
         self.deck_con.commit()
+        self._selected_card_ids.discard(card_id)
         self._schedule_autosave()
         self._refresh_deck_count()
         self._populate_deck_screen()
+
+    # ---------- Selezione multipla di carte ----------
+    def _update_selection_text(self):
+        count = len(self._selected_card_ids)
+        self.selection_text = f"{count} selected" if count else "Tap cards to select"
+
+    def toggle_select_mode(self):
+        self.select_mode = not self.select_mode
+        self._selected_card_ids = set()
+        self.deck_message = ""
+        if self.select_mode:
+            self._update_selection_text()
+        else:
+            self.selection_text = ""
+        self._populate_deck_screen()
+
+    def toggle_card_selected(self, card_id):
+        if card_id in self._selected_card_ids:
+            self._selected_card_ids.discard(card_id)
+        else:
+            self._selected_card_ids.add(card_id)
+        icon = self._select_icons.get(card_id)
+        if icon is not None:
+            icon.icon = ("checkbox-marked" if card_id in self._selected_card_ids
+                         else "checkbox-blank-outline")
+        self._update_selection_text()
+
+    def select_all_cards(self):
+        """Seleziona tutte le carte mostrate; se lo sono gia' tutte, le deseleziona."""
+        visible = set(self._visible_card_ids)
+        if visible and visible <= self._selected_card_ids:
+            self._selected_card_ids -= visible
+        else:
+            self._selected_card_ids |= visible
+        for card_id, icon in self._select_icons.items():
+            icon.icon = ("checkbox-marked" if card_id in self._selected_card_ids
+                         else "checkbox-blank-outline")
+        self._update_selection_text()
+
+    # ---------- Mazzi per categoria ----------
+    def _refresh_target_label(self):
+        name = userdata.deck_name(self.deck_con, self.target_deck_id)
+        self.target_deck_label = name if len(name) <= 14 else name[:13] + "…"
+
+    def _load_target_deck(self):
+        raw = userdata.get_setting(self.deck_con, "target_deck")
+        self.target_deck_id = None
+        if raw and raw.isdigit() and userdata.deck_exists(self.deck_con, int(raw)):
+            self.target_deck_id = int(raw)
+        self._refresh_target_label()
+
+    def _set_target_deck(self, deck_id):
+        self.target_deck_id = deck_id
+        userdata.set_setting(self.deck_con, "target_deck", "" if deck_id is None else str(deck_id))
+        self._refresh_target_label()
+
+    def open_decks(self, mode):
+        """mode: 'target' = dove vanno le nuove carte, 'move' = dove spostare
+        le carte selezionate, 'view' = quali carte mostrare."""
+        if mode == "move" and not self._selected_card_ids:
+            self.selection_text = "Select at least one card first"
+            return
+        self.decks_mode = mode
+        self.decks_title = {
+            "target": "Add new cards to…",
+            "move": f"Move {len(self._selected_card_ids)} cards to…",
+            "view": "Show cards from…",
+        }[mode]
+        self.decks_message = ""
+        self._populate_decks_screen()
+        self.root.current = "decks"
+
+    def _populate_decks_screen(self):
+        decks_list = self.root.get_screen("decks").ids.decks_list
+        decks_list.clear_widgets()
+        decks = userdata.list_decks(self.deck_con)
+        entries = []
+        if self.decks_mode == "view":
+            entries.append(("all", "All cards", sum(d["count"] for d in decks)))
+        entries += [(d["id"], d["name"], d["count"]) for d in decks]
+        for deck_id, name, count in entries:
+            secondary = f"{count} card{'' if count == 1 else 's'}"
+            if self.decks_mode == "target" and deck_id == self.target_deck_id:
+                secondary += " · new cards go here"
+            elif self.decks_mode == "view" and deck_id == self._deck_filter:
+                secondary += " · showing"
+            if isinstance(deck_id, int):      # categorie: eliminabili. Default e "All" no.
+                item = TwoLineRightIconListItem(
+                    text=name, secondary_text=secondary,
+                    on_release=lambda inst, i=deck_id: self.deck_chosen(i),
+                )
+                trash = IconRightWidget(icon="trash-can-outline")
+                trash.bind(on_release=lambda inst, i=deck_id, n=name: self.confirm_delete_deck(i, n))
+                item.add_widget(trash)
+            else:
+                item = TwoLineListItem(
+                    text=name, secondary_text=secondary,
+                    on_release=lambda inst, i=deck_id: self.deck_chosen(i),
+                )
+            decks_list.add_widget(item)
+
+    def deck_chosen(self, deck_id):
+        name = "All cards" if deck_id == "all" else userdata.deck_name(self.deck_con, deck_id)
+        if self.decks_mode == "target":
+            self._set_target_deck(deck_id)
+            self.root.current = "search"
+            self._flash_status(f"New cards will go to: {name}", duration=2.5)
+        elif self.decks_mode == "move":
+            moved = userdata.move_cards(self.deck_con, self._selected_card_ids, deck_id)
+            self.select_mode = False
+            self._selected_card_ids = set()
+            self.selection_text = ""
+            self.deck_message = f"Moved {moved} card{'' if moved == 1 else 's'} to {name}"
+            self._schedule_autosave()
+            self._show_deck_screen()
+        else:  # view
+            self._deck_filter = deck_id
+            self.deck_message = ""
+            self._show_deck_screen()
+
+    def decks_back(self):
+        if self.decks_mode == "target":
+            self.root.current = "search"
+        else:
+            self._show_deck_screen()
+
+    def create_deck_from_field(self):
+        field = self.root.get_screen("decks").ids.new_deck_name
+        try:
+            new_id = userdata.create_deck(self.deck_con, field.text)
+        except ValueError as exc:
+            self.decks_message = str(exc)
+            return
+        name = userdata.deck_name(self.deck_con, new_id)
+        field.text = ""
+        self.decks_message = f'Deck "{name}" created'
+        if self.decks_mode == "target":      # probabilmente lo si vuole usare subito
+            self._set_target_deck(new_id)
+            self.decks_message += " · new cards will go here"
+        self._schedule_autosave()
+        self._populate_decks_screen()
+
+    def confirm_delete_deck(self, deck_id, name):
+        count = next((d["count"] for d in userdata.list_decks(self.deck_con)
+                      if d["id"] == deck_id), 0)
+        self._dialog = MDDialog(
+            title="Delete this deck?",
+            text=(f'"{name}" will be deleted. Its {count} card{"" if count == 1 else "s"} '
+                  "are not lost: they move to the Default deck."),
+            buttons=[
+                MDFlatButton(text="CANCEL", on_release=lambda *a: self._dialog.dismiss()),
+                MDRaisedButton(
+                    text="DELETE",
+                    on_release=lambda *a: self._delete_deck_confirmed(deck_id, name),
+                ),
+            ],
+        )
+        self._dialog.open()
+
+    def _delete_deck_confirmed(self, deck_id, name):
+        if self._dialog is not None:
+            self._dialog.dismiss()
+        moved = userdata.delete_deck(self.deck_con, deck_id)
+        if self.target_deck_id == deck_id:
+            self._set_target_deck(None)
+        if self._deck_filter == deck_id:
+            self._deck_filter = "all"
+        self.decks_message = f'Deck "{name}" deleted · {moved} card{"" if moved == 1 else "s"} moved to Default'
+        self._schedule_autosave()
+        self._populate_decks_screen()
 
     # ---------- Ripasso a ripetizione spaziata ----------
     def _load_review_queue(self, force_restart=False):
