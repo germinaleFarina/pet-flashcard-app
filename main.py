@@ -97,11 +97,14 @@ from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.lang import Builder
 from kivy.properties import StringProperty, BooleanProperty
-from kivy.utils import platform
+from kivy.uix.scrollview import ScrollView
+from kivy.utils import escape_markup, platform
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
+from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDFlatButton, MDRaisedButton
 from kivymd.uix.dialog import MDDialog
+from kivymd.uix.label import MDLabel
 from kivymd.uix.list import (
     IconLeftWidgetWithoutTouch, IconRightWidget, OneLineListItem,
     TwoLineAvatarIconListItem, TwoLineListItem, TwoLineRightIconListItem,
@@ -690,6 +693,40 @@ class FlashcardApp(MDApp):
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Gray"
         self.title = "DigiVol"
+        try:
+            return self._build_app()
+        except Exception:  # noqa: BLE001 - qualunque errore di avvio
+            # Invece di chiudersi, l'app mostra l'errore a schermo.
+            return self._startup_error_screen(traceback.format_exc())
+
+    def _startup_error_screen(self, report):
+        """Schermata minimale mostrata se l'avvio fallisce: riporta l'errore
+        completo e permette di copiarlo, cosi' non serve un cavo e adb."""
+        try:
+            with open(Path(self.user_data_dir) / "startup_error.txt", "w", encoding="utf-8") as handle:
+                handle.write(report)
+        except Exception:  # noqa: BLE001
+            pass
+
+        def copy_report(*_args):
+            try:
+                from kivy.core.clipboard import Clipboard  # noqa: WPS433
+
+                Clipboard.copy(report)
+            except Exception:  # noqa: BLE001
+                pass
+
+        text = ("DigiVol could not start.\nTap \"Copy report\" and paste it into a "
+                "message to the developer (or take a screenshot).\n\n" + report[-2500:])
+        layout = MDBoxLayout(orientation="vertical", padding="12dp", spacing="8dp")
+        scroll = ScrollView()
+        scroll.add_widget(MDLabel(text=escape_markup(text), font_style="Caption", adaptive_height=True))
+        layout.add_widget(scroll)
+        layout.add_widget(MDRaisedButton(text="Copy report", on_release=copy_report,
+                                         pos_hint={"center_x": 0.5}))
+        return layout
+
+    def _build_app(self):
 
         # Con la tastiera aperta, sposta lo schermo quanto basta a tenere
         # visibile il campo in cui si sta scrivendo (moduli).
