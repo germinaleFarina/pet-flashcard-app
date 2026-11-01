@@ -24,7 +24,9 @@ Regole di sicurezza (sono il motivo per cui nessun dato si perde):
 """
 
 import json
+import math
 import sqlite3
+import time
 import uuid
 from datetime import date, datetime
 
@@ -58,6 +60,20 @@ _CANON = {
 MAX_WORD_LENGTH = 200
 MAX_TRANSLATION_LENGTH = 1000
 MAX_NOTE_LENGTH = 1000
+
+# ---------------------------------------------------------------------------
+# Tempi di ripasso (quanto aspettare prima di rivedere una carta, per ognuna
+# delle quattro risposte). Sono salvati nelle impostazioni, in secondi.
+# ---------------------------------------------------------------------------
+REVIEW_KEYS = ("again", "hard", "good", "easy")     # nell'ordine dei pulsanti
+DEFAULT_REVIEW_INTERVALS = {
+    "again": 60,          # 1 minuto
+    "hard": 300,          # 5 minuti
+    "good": 86400,        # 1 giorno
+    "easy": 259200,       # 3 giorni
+}
+MAX_INTERVAL_SECONDS = 3650 * 86400                 # 10 anni
+INTERVAL_UNITS = (("minutes", 60), ("hours", 3600), ("days", 86400))
 
 # Il mazzo "Default" e' sempre presente: e' dove vanno le carte che non sono
 # state assegnate a nessuna categoria (nel database: category_id NULL).
@@ -100,7 +116,29 @@ def init_user_tables(con):
         if "category_id" not in deck_cols:
             con.execute("ALTER TABLE deck ADD COLUMN category_id INTEGER")
         con.execute("CREATE INDEX IF NOT EXISTS idx_deck_category ON deck (category_id)")
+        # Orario esatto di scadenza (secondi dal 1970): serve per i tempi di
+        # ripasso piu' brevi di un giorno. Le carte esistenti partono dalla
+        # mezzanotte (ora locale) della loro vecchia data di scadenza.
+        if "due_at" not in deck_cols:
+            con.execute("ALTER TABLE deck ADD COLUMN due_at INTEGER")
+        for (old_date,) in con.execute(
+            "SELECT DISTINCT due_date FROM deck WHERE due_at IS NULL"
+        ).fetchall():
+            con.execute(
+                "UPDATE deck SET due_at = ? WHERE due_at IS NULL AND due_date IS ?",
+                (_midnight_epoch(old_date), old_date),
+            )
+        con.execute("CREATE INDEX IF NOT EXISTS idx_deck_due_at ON deck (due_at)")
     con.commit()
+
+
+def _midnight_epoch(iso_date):
+    """Mezzanotte locale di una data ISO, in secondi; se la data non e'
+    leggibile, adesso (la carta risulta da ripassare subito)."""
+    try:
+        return int(datetime.fromisoformat(str(iso_date)).timestamp())
+    except (TypeError, ValueError):
+        return int(time.time())
 
 
 def get_setting(con, key, default=None):
@@ -187,6 +225,8 @@ def parse_file(text, kind):
 
 
 def _as_int(value, default, lo, hi):
+    if isinstance(value, bool):
+        return default
     try:
         return max(lo, min(hi, int(value)))
     except (TypeError, ValueError):
@@ -215,12 +255,12 @@ def export_deck_text(con):
     names = [r[0] for r in con.execute("SELECT name FROM categories ORDER BY id")]
     rows = con.execute(
         "SELECT d.front, d.back, d.due_date, d.interval_days, d.ease_factor, "
-        "d.repetitions, c.name FROM deck d "
+        "d.repetitions, c.name, d.due_at FROM deck d "
         "LEFT JOIN categories c ON d.category_id = c.id ORDER BY d.id"
     ).fetchall()
-    lines = [_header("deck", decks=names)]
-    for front, back, due, interval, ease, reps, deck in rows:
-        rec = {"front": front, "back": back, "due": due,
+    lines = [_header("deck", decks=names, intervals=get_review_intervals(con))]
+    for front, back, due, interval, ease, reps, deck, due_at in rows:
+        rec = {"front": front, "back": back, "due": due, "due_at": due_at,
                "interval": interval, "ease": ease, "reps": reps}
         if deck:                      # le carte del mazzo Default non hanno il campo
             rec["deck"] = deck
@@ -234,6 +274,13 @@ def merge_deck_text(con, text):
     suo mazzo). I mazzi per categoria mancanti vengono ricreati.
     -> (aggiunte, gia_presenti, righe_non_valide)"""
     head, records, bad = parse_file(text, "deck")
+    # Tempi di ripasso: si adottano solo se l'utente non ne ha mai scelti di suoi.
+    saved_intervals = head.get("intervals")
+    if isinstance(saved_intervals, dict) and get_setting(con, "review_intervals") is None:
+        try:
+            set_review_intervals(con, saved_intervals)
+        except ValueError:
+            pass
     listed = head.get("decks")
     if isinstance(listed, list):
         for name in listed:
@@ -254,18 +301,106 @@ def merge_deck_text(con, text):
         deck_name_in_file = rec.get("deck")
         category_id = (get_or_create_deck(con, deck_name_in_file)
                        if isinstance(deck_name_in_file, str) else None)
+        due_date = _as_date(rec.get("due"))
+        due_at = _as_int(rec.get("due_at"), None, 0, 4_000_000_000)
+        if due_at is None:                       # file di una versione precedente
+            due_at = _midnight_epoch(due_date)
         con.execute(
             "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, "
-            "repetitions, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (front, back, _as_date(rec.get("due")),
+            "repetitions, category_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (front, back, due_date,
              _as_int(rec.get("interval"), 0, 0, 36500),
              _as_float(rec.get("ease"), 2.5, 1.3, 5.0),
              _as_int(rec.get("reps"), 0, 0, 100000),
-             category_id),
+             category_id, due_at),
         )
         added += 1
     con.commit()
     return added, skipped, bad
+
+
+# ---------------------------------------------------------------------------
+# Tempi di ripasso
+# ---------------------------------------------------------------------------
+
+def _valid_intervals(data):
+    """Controlla un dict {again, hard, good, easy: secondi}. ValueError se
+    qualcosa non va; restituisce un dict pulito con tutte e quattro le chiavi."""
+    if not isinstance(data, dict):
+        raise ValueError("invalid intervals")
+    clean = {}
+    for key in REVIEW_KEYS:
+        value = data.get(key, DEFAULT_REVIEW_INTERVALS[key])
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"invalid interval for {key}")
+        seconds = int(value)
+        if seconds < 0 or seconds > MAX_INTERVAL_SECONDS:
+            raise ValueError(f"interval out of range for {key}")
+        clean[key] = seconds
+    return clean
+
+
+def get_review_intervals(con):
+    """I tempi scelti dall'utente (o quelli predefiniti). Mai eccezioni:
+    un valore rovinato nelle impostazioni equivale ai predefiniti."""
+    raw = get_setting(con, "review_intervals")
+    if raw:
+        try:
+            return _valid_intervals(json.loads(raw))
+        except ValueError:
+            pass
+    return dict(DEFAULT_REVIEW_INTERVALS)
+
+
+def set_review_intervals(con, intervals):
+    set_setting(con, "review_intervals", _dumps(_valid_intervals(intervals)))
+
+
+def split_interval(seconds):
+    """Secondi -> (numero, unita') con l'unita' piu' grande che divide
+    esattamente: 86400 -> (1, 'days'), 300 -> (5, 'minutes')."""
+    seconds = max(0, int(seconds))
+    for unit, factor in reversed(INTERVAL_UNITS):
+        if seconds and seconds % factor == 0:
+            return seconds // factor, unit
+    return round(seconds / 60), "minutes"
+
+
+def interval_seconds(value, unit):
+    """(numero, unita') -> secondi. ValueError se non e' un numero intero
+    valido."""
+    factor = dict(INTERVAL_UNITS).get(unit)
+    text = str(value).strip()
+    if factor is None or not text.isdigit():
+        raise ValueError("invalid interval")
+    seconds = int(text) * factor
+    if seconds > MAX_INTERVAL_SECONDS:
+        raise ValueError("interval too long")
+    return seconds
+
+
+def format_interval(seconds):
+    """'now', '1 min', '5 min', '2 h', '1 day', '3 days' (arrotondato)."""
+    seconds = max(0, int(seconds))
+    if seconds == 0:
+        return "now"
+    if seconds < 3600:
+        return f"{max(1, round(seconds / 60))} min"
+    if seconds < 86400:
+        hours = seconds / 3600
+        return f"{round(hours)} h" if abs(hours - round(hours)) < 0.05 else f"{hours:.1f} h"
+    days = round(seconds / 86400)
+    return "1 day" if days == 1 else f"{days} days"
+
+
+def format_wait(seconds):
+    """Attesa residua per il conto alla rovescia: '40 s', '4 min', '2 h'."""
+    seconds = max(1, int(math.ceil(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{math.ceil(seconds / 60)} min"
+    return f"{math.ceil(seconds / 3600)} h"
 
 
 # ---------------------------------------------------------------------------

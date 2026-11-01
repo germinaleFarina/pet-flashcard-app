@@ -233,8 +233,8 @@ class VocabSearcher:
         missing = cls.REQUIRED_COLUMNS - cols
         if missing:
             raise RuntimeError(
-                "vocab.db e' di una versione vecchia (mancano le colonne "
-                f"{sorted(missing)}). Rigeneralo con: "
+                "vocab.db is outdated (missing columns "
+                f"{sorted(missing)}). Rebuild it with: "
                 "python import_vocab.py --csv vocabolario_finale.csv"
             )
 

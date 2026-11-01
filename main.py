@@ -77,6 +77,13 @@ Mazzi per categoria:
   modalita' selezione, spostare piu' carte in un colpo solo in un mazzo.
   I mazzi fanno parte del backup. Il ripasso, per ora, include tutti i mazzi.
 
+Tempi di ripasso:
+- Per ognuna delle quattro risposte (Di nuovo, Difficile, Bene, Facile)
+  l'utente sceglie dopo quanto la carta deve tornare (minuti, ore o giorni):
+  icona a ingranaggio nella schermata Ripasso. Fino a 20 minuti la carta torna
+  nella stessa sessione, quando il suo tempo e' scaduto; oltre, alla sessione
+  successiva. I tempi fanno parte del backup del mazzo.
+
 Prima del primo avvio, genera vocab.db dal CSV con:
     python import_vocab.py --csv vocabolario_finale.csv
 
@@ -89,6 +96,7 @@ import random
 import shutil
 import sqlite3
 import sys
+import time
 import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -136,6 +144,14 @@ REVIEW_SESSION_TIMEOUT_HOURS = 6
 # Dopo una modifica al mazzo, attende questi secondi prima di aggiornare il
 # file di backup (cosi' piu' modifiche ravvicinate producono una sola scrittura).
 AUTOSAVE_DELAY_SECONDS = 3.0
+
+# Le carte che tornano entro questo tempo restano nella sessione di ripasso in
+# corso (e riappaiono quando il loro tempo e' scaduto); le altre escono.
+LEARN_AHEAD_SECONDS = 20 * 60
+
+# Le quattro risposte, nell'ordine dei pulsanti del ripasso.
+REVIEW_LABELS = (("again", "Again"), ("hard", "Hard"),
+                 ("good", "Good"), ("easy", "Easy"))
 
 # Etichette mostrate nel riquadro della traduzione. Il database contiene i
 # valori in italiano (Sostantivo, Maschile, ...): qui vengono tradotti in
@@ -191,6 +207,7 @@ ScreenManager:
     FormScreen:
     DataScreen:
     DecksScreen:
+    ReviewSettingsScreen:
 
 <SplashScreen>:
     name: "splash"
@@ -528,6 +545,79 @@ ScreenManager:
             MDList:
                 id: decks_list
 
+<IntervalRow>:
+    orientation: "horizontal"
+    size_hint_y: None
+    height: "56dp"
+    spacing: "8dp"
+    MDLabel:
+        text: root.title
+        size_hint_x: 0.34
+        size_hint_y: None
+        height: self.texture_size[1]
+        pos_hint: {"center_y": 0.5}
+    MDTextField:
+        id: value
+        hint_text: "0"
+        input_filter: "int"
+        mode: "rectangle"
+        size_hint_x: 0.28
+    MDRaisedButton:
+        text: root.unit
+        size_hint_x: 0.38
+        pos_hint: {"center_y": 0.5}
+        on_release: root.cycle_unit()
+
+<ReviewSettingsScreen>:
+    name: "reviewsettings"
+    MDBoxLayout:
+        orientation: "vertical"
+
+        MDTopAppBar:
+            title: "Review timing"
+            left_action_items: [["arrow-left", lambda x: app.close_review_settings()]]
+
+        ScrollView:
+            do_scroll_x: False
+            MDBoxLayout:
+                orientation: "vertical"
+                adaptive_height: True
+                padding: "16dp"
+                spacing: "14dp"
+
+                MDLabel:
+                    text: "After each answer, the card comes back after the time you choose here. Up to 20 minutes it returns in the same session; longer, in the next session."
+                    theme_text_color: "Secondary"
+                    adaptive_height: True
+
+                IntervalRow:
+                    id: row_again
+                    title: "Again"
+                IntervalRow:
+                    id: row_hard
+                    title: "Hard"
+                IntervalRow:
+                    id: row_good
+                    title: "Good"
+                IntervalRow:
+                    id: row_easy
+                    title: "Easy"
+
+                MDLabel:
+                    text: app.review_settings_message
+                    theme_text_color: "Secondary"
+                    adaptive_height: True
+
+                MDBoxLayout:
+                    adaptive_height: True
+                    spacing: "8dp"
+                    MDRaisedButton:
+                        text: "Save"
+                        on_release: app.save_review_settings()
+                    MDFlatButton:
+                        text: "Restore defaults"
+                        on_release: app.reset_review_settings()
+
 <ReviewScreen>:
     name: "review"
     MDBoxLayout:
@@ -536,9 +626,9 @@ ScreenManager:
         spacing: "16dp"
 
         MDTopAppBar:
-            title: "Ripasso"
+            title: "Review"
             left_action_items: [["arrow-left", lambda x: app.go_to_search()]]
-            right_action_items: [["restart", lambda x: app.restart_review()]]
+            right_action_items: [["restart", lambda x: app.restart_review()], ["cog-outline", lambda x: app.open_review_settings()]]
 
         MDLabel:
             id: review_status_label
@@ -546,32 +636,53 @@ ScreenManager:
             halign: "center"
             theme_text_color: "Secondary"
             font_style: "Caption"
+            size_hint_y: None
+            adaptive_height: True
+
+        MDLabel:
+            text: app.review_intervals_text
+            halign: "center"
+            theme_text_color: "Hint"
+            font_style: "Caption"
+            adaptive_height: True
 
         MDCard:
             orientation: "vertical"
-            padding: "20dp"
-            size_hint_y: None
-            height: "160dp"
+            padding: "16dp"
             radius: [16]
-            pos_hint: {"center_x": 0.5}
-            MDLabel:
-                id: review_front_label
-                text: app.current_card_front
-                halign: "center"
-                theme_text_color: "Primary"
-                font_style: "H5"
-            MDLabel:
-                id: review_back_label
-                text: app.current_card_back if app.answer_revealed else ""
-                halign: "center"
-                theme_text_color: "Secondary"
-                font_style: "H6"
+            ScrollView:
+                do_scroll_x: False
+                MDBoxLayout:
+                    orientation: "vertical"
+                    adaptive_height: True
+                    spacing: "20dp"
+                    MDLabel:
+                        id: review_front_label
+                        text: app.current_card_front
+                        halign: "center"
+                        theme_text_color: "Primary"
+                        font_style: "H5"
+                        adaptive_height: True
+                    MDLabel:
+                        id: review_back_label
+                        text: app.current_card_back if app.answer_revealed else ""
+                        halign: "center"
+                        theme_text_color: "Secondary"
+                        font_style: "H6"
+                        adaptive_height: True
 
         MDRaisedButton:
-            text: "Mostra risposta"
+            text: "Show answer"
             pos_hint: {"center_x": 0.5}
             disabled: app.answer_revealed or not app.current_card_front
             on_release: app.reveal_answer()
+
+        MDFlatButton:
+            text: "Review now"
+            pos_hint: {"center_x": 0.5}
+            opacity: 1 if app.review_waiting else 0
+            disabled: not app.review_waiting
+            on_release: app.review_early()
 
         MDBoxLayout:
             id: grade_buttons
@@ -583,19 +694,19 @@ ScreenManager:
             disabled: not app.answer_revealed
 
             MDRaisedButton:
-                text: "Di nuovo"
+                text: "Again"
                 md_bg_color: 0.25, 0.25, 0.25, 1
                 on_release: app.grade_card(0)
             MDRaisedButton:
-                text: "Difficile"
+                text: "Hard"
                 md_bg_color: 0.4, 0.4, 0.4, 1
                 on_release: app.grade_card(1)
             MDRaisedButton:
-                text: "Bene"
+                text: "Good"
                 md_bg_color: 0.55, 0.55, 0.55, 1
                 on_release: app.grade_card(2)
             MDRaisedButton:
-                text: "Facile"
+                text: "Easy"
                 md_bg_color: 0.75, 0.75, 0.75, 1
                 on_release: app.grade_card(3)
 """
@@ -629,6 +740,20 @@ class DecksScreen(MDScreen):
     pass
 
 
+class ReviewSettingsScreen(MDScreen):
+    pass
+
+
+class IntervalRow(MDBoxLayout):
+    """Una riga della schermata dei tempi: nome della risposta, numero e unita'."""
+    title = StringProperty("")
+    unit = StringProperty("minutes")
+
+    def cycle_unit(self):
+        names = [name for name, _factor in userdata.INTERVAL_UNITS]
+        self.unit = names[(names.index(self.unit) + 1) % len(names)]
+
+
 class FlashcardApp(MDApp):
     current_translation = StringProperty("")
     current_word = StringProperty("")
@@ -651,6 +776,10 @@ class FlashcardApp(MDApp):
     current_card_back = StringProperty("")
     answer_revealed = BooleanProperty(False)
     review_status_text = StringProperty("")
+    review_waiting = BooleanProperty(False)         # nessuna carta scaduta: si attende
+    review_intervals_text = StringProperty("")
+    review_settings_message = StringProperty("")
+    _review_timer = None
 
     # ---------- Moduli (correzioni / voci personali) e backup ----------
     form_title = StringProperty("")
@@ -679,6 +808,7 @@ class FlashcardApp(MDApp):
     _visible_card_ids = None
     _select_icons = None
     _dialog = None
+    _dialog_open = False
 
     storage = None                 # cartella di backup, aperta solo quando serve
     _storage_spec = None           # specifica salvata della cartella
@@ -800,6 +930,8 @@ class FlashcardApp(MDApp):
         self._init_backup_storage()
         self._load_target_deck()
         self.root = Builder.load_string(KV)
+        # Tasto "indietro" di Android (e ESC sul desktop): schermata precedente.
+        Window.bind(on_keyboard=self._on_back_key)
         self._refresh_deck_count()
 
         # Mostra la schermata di avvio (logo + nome + slogan) per un tempo
@@ -811,6 +943,44 @@ class FlashcardApp(MDApp):
         Clock.schedule_once(lambda dt: self.searcher.warm_up(False), 1.0)
 
         return self.root
+
+    # ---------- Tasto indietro ----------
+    def _on_back_key(self, window, key, *args):
+        """Android manda il tasto indietro come ESC (codice 27). Se lo si
+        lascia passare, l'app si chiude: qui lo si usa per tornare alla
+        schermata precedente. Solo sulla ricerca (la schermata principale) il
+        sistema chiude l'app, come in qualunque app."""
+        if key != 27:
+            return False
+        try:
+            return self.go_back()
+        except Exception as exc:  # noqa: BLE001 - un errore qui non deve chiudere l'app
+            self._log_error("back key", exc)
+            return True
+
+    def go_back(self):
+        """True se il tasto indietro e' stato gestito (l'app resta aperta)."""
+        if self._dialog_open and self._dialog is not None:
+            self._dialog.dismiss()
+            self._dialog_open = False
+            return True
+        screen = getattr(self.root, "current", None)
+        if screen in (None, "splash", "search"):
+            return False
+        if screen == "deck":
+            if self.select_mode:
+                self.toggle_select_mode()     # prima si esce dalla selezione
+            else:
+                self.go_to_search()
+        elif screen == "decks":
+            self.decks_back()
+        elif screen == "reviewsettings":
+            self.close_review_settings()
+        elif screen == "form":
+            self.cancel_form()
+        else:                                 # review, data
+            self.go_to_search()
+        return True
 
     def on_pause(self):
         # Android manda l'app in secondo piano: ultimo momento sicuro per
@@ -839,8 +1009,8 @@ class FlashcardApp(MDApp):
             if self.vocab_db_path.exists():
                 return  # nessun dizionario incluso: usa la copia locale
             raise FileNotFoundError(
-                "vocab.db non trovato. Esegui prima import_vocab.py per creare il "
-                "database del vocabolario a partire dal tuo CSV, prima di impacchettare l'app."
+                "vocab.db not found. Run import_vocab.py first to build the dictionary "
+                "database from your CSV, before packaging the app."
             )
         if (not self.vocab_db_path.exists()
                 or _db_version(BUNDLED_VOCAB_DB) > _db_version(self.vocab_db_path)):
@@ -1392,11 +1562,12 @@ class FlashcardApp(MDApp):
 
         # Le due carte (fronte->retro e retro->fronte) vanno nel mazzo scelto
         # con il pulsante "Deck: ..." (Default se non e' stato scelto nulla).
+        now = int(time.time())
         for card_front, card_back in ((front, back), (back, front)):
             con.execute(
                 "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, "
-                "repetitions, category_id) VALUES (?, ?, ?, 0, 2.5, 0, ?)",
-                (card_front, card_back, TODAY, self.target_deck_id),
+                "repetitions, category_id, due_at) VALUES (?, ?, ?, 0, 2.5, 0, ?, ?)",
+                (card_front, card_back, date.today().isoformat(), self.target_deck_id, now),
             )
         con.commit()
         self._schedule_autosave()
@@ -1433,10 +1604,12 @@ class FlashcardApp(MDApp):
         self.root.current = "deck"
 
     def go_to_search(self):
+        self._cancel_review_timer()
         self.root.current = "search"
 
     def go_to_review(self):
         self._load_review_queue()
+        self._refresh_intervals_text()
         self.root.current = "review"
         self._show_next_review_card()
 
@@ -1640,18 +1813,26 @@ class FlashcardApp(MDApp):
             text=(f'"{name}" will be deleted. Its {count} card{"" if count == 1 else "s"} '
                   "are not lost: they move to the Default deck."),
             buttons=[
-                MDFlatButton(text="CANCEL", on_release=lambda *a: self._dialog.dismiss()),
+                MDFlatButton(text="CANCEL", on_release=lambda *a: self._close_dialog()),
                 MDRaisedButton(
                     text="DELETE",
                     on_release=lambda *a: self._delete_deck_confirmed(deck_id, name),
                 ),
             ],
         )
+        self._dialog_open = True
+        self._dialog.bind(on_dismiss=lambda *a: setattr(self, "_dialog_open", False))
         self._dialog.open()
+
+    def _close_dialog(self):
+        if self._dialog is not None:
+            self._dialog.dismiss()
+        self._dialog_open = False
 
     def _delete_deck_confirmed(self, deck_id, name):
         if self._dialog is not None:
             self._dialog.dismiss()
+        self._dialog_open = False
         moved = userdata.delete_deck(self.deck_con, deck_id)
         if self.target_deck_id == deck_id:
             self._set_target_deck(None)
@@ -1662,14 +1843,25 @@ class FlashcardApp(MDApp):
         self._populate_decks_screen()
 
     # ---------- Ripasso a ripetizione spaziata ----------
+    _CARD_COLUMNS = "id, front, back, interval_days, ease_factor, repetitions, due_at"
+
+    def _card_dict(self, row, learning=False):
+        """Una carta della coda di ripasso. learning=True: e' una carta che ha
+        un tempo di attesa da rispettare (appare quando e' scaduto)."""
+        return {
+            "id": row[0], "front": row[1], "back": row[2],
+            "interval_days": row[3], "ease_factor": row[4], "repetitions": row[5],
+            "due_at": row[6] or 0, "learning": learning,
+        }
+
     def _load_review_queue(self, force_restart=False):
+        now = time.time()
         resumed_ids = None if force_restart else self._load_saved_session()
 
         if resumed_ids:
             placeholders = ",".join("?" * len(resumed_ids))
             rows = self.deck_con.execute(
-                "SELECT id, front, back, interval_days, ease_factor, repetitions "
-                f"FROM deck WHERE id IN ({placeholders})",
+                f"SELECT {self._CARD_COLUMNS} FROM deck WHERE id IN ({placeholders})",
                 resumed_ids,
             ).fetchall()
             rows_by_id = {r[0]: r for r in rows}
@@ -1680,24 +1872,22 @@ class FlashcardApp(MDApp):
             # anche dopo che l'app e' stata chiusa e riaperta.
             self._original_ids = self._load_original_ids() or [r[0] for r in ordered_rows]
         else:
+            # Carte scadute, piu' quelle che scadono entro pochi minuti (si
+            # mostreranno quando sara' il loro momento).
             rows = self.deck_con.execute(
-                "SELECT id, front, back, interval_days, ease_factor, repetitions "
-                "FROM deck WHERE due_date <= ? ORDER BY due_date ASC, id ASC",
-                (TODAY,),
+                f"SELECT {self._CARD_COLUMNS} FROM deck "
+                "WHERE due_at IS NULL OR due_at <= ? ORDER BY due_at ASC, id ASC",
+                (int(now + LEARN_AHEAD_SECONDS),),
             ).fetchall()
             ordered_rows = list(rows)
             random.shuffle(ordered_rows)  # ordine casuale ad ogni nuova sessione
             # Questo e' il lotto "originale" della nuova sessione: restart
-            # potra' rimescolarlo anche quando le due_date delle carte
+            # potra' rimescolarlo anche quando le scadenze delle carte
             # cambieranno via via che le valuti.
             self._original_ids = [r[0] for r in ordered_rows]
 
         self.review_queue = [
-            {
-                "id": r[0], "front": r[1], "back": r[2],
-                "interval_days": r[3], "ease_factor": r[4], "repetitions": r[5],
-            }
-            for r in ordered_rows
+            self._card_dict(r, learning=(r[6] or 0) > now) for r in ordered_rows
         ]
         self._save_review_session()
 
@@ -1771,7 +1961,7 @@ class FlashcardApp(MDApp):
         toccato da qui, solo letto.
         """
         rows = self.deck_con.execute(
-            "SELECT id, front, back, interval_days, ease_factor, repetitions FROM deck"
+            f"SELECT {self._CARD_COLUMNS} FROM deck"
         ).fetchall()
 
         if not rows:
@@ -1783,87 +1973,171 @@ class FlashcardApp(MDApp):
             self.current_card_id = None
             self.current_card_front = ""
             self.current_card_back = ""
-            self.review_status_text = "Il mazzo e' vuoto: aggiungi qualche flashcard prima."
+            self.review_status_text = "Your deck is empty: add some flashcards first."
             return
 
         ordered_rows = list(rows)
         random.shuffle(ordered_rows)  # nuovo ordine casuale ad ogni ripasso anticipato
 
-        self.review_queue = [
-            {
-                "id": r[0], "front": r[1], "back": r[2],
-                "interval_days": r[3], "ease_factor": r[4], "repetitions": r[5],
-            }
-            for r in ordered_rows
-        ]
+        # Ripasso anticipato: tutte le carte, anche quelle non ancora scadute.
+        self.review_queue = [self._card_dict(r, learning=False) for r in ordered_rows]
         self._original_ids = [r[0] for r in ordered_rows]
         self._save_review_session()
         self._show_next_review_card()
 
+    def _cancel_review_timer(self):
+        if self._review_timer is not None:
+            self._review_timer.cancel()
+            self._review_timer = None
+
+    def _pick_next_index(self, now):
+        """Quale carta mostrare. Prima le carte con un tempo di attesa gia'
+        scaduto (la piu' vecchia per prima), poi quelle ancora da vedere nella
+        sessione, nell'ordine mescolato. None = nessuna e' pronta."""
+        due = [i for i, c in enumerate(self.review_queue)
+               if c.get("learning") and c.get("due_at", 0) <= now]
+        if due:
+            return min(due, key=lambda i: self.review_queue[i].get("due_at", 0))
+        for i, card in enumerate(self.review_queue):
+            if not card.get("learning"):
+                return i
+        return None
+
     def _show_next_review_card(self):
         self.answer_revealed = False
+        self.review_waiting = False
+        self._cancel_review_timer()
         remaining = len(self.review_queue)
         if remaining == 0:
             self.current_card_id = None
             self.current_card_front = ""
             self.current_card_back = ""
-            self.review_status_text = "Nessuna carta da ripassare oggi! 🎉"
+            self.review_status_text = "No cards to review right now."
             self._clear_review_session()
             return
 
-        card = self.review_queue[0]
+        now = time.time()
+        index = self._pick_next_index(now)
+        if index is None:
+            # Restano solo carte con un tempo di attesa non ancora scaduto.
+            soonest = min(c.get("due_at", 0) for c in self.review_queue)
+            wait = max(1.0, soonest - now)
+            self.current_card_id = None
+            self.current_card_front = ""
+            self.current_card_back = ""
+            self.review_waiting = True
+            self.review_status_text = (
+                f"Next card in {userdata.format_wait(wait)} "
+                f"({remaining} waiting)"
+            )
+            # Riprova (e aggiorna il conto alla rovescia) al piu' tra 20 secondi.
+            self._review_timer = Clock.schedule_once(
+                lambda dt: self._show_next_review_card(), min(wait, 20)
+            )
+            return
+
+        # La carta scelta passa in testa: review_queue[0] e' sempre quella mostrata.
+        card = self.review_queue.pop(index)
+        self.review_queue.insert(0, card)
         self.current_card_id = card["id"]
         self.current_card_front = card["front"]
         self.current_card_back = card["back"]
-        self.review_status_text = f"{remaining} carte da ripassare"
+        self.review_status_text = (
+            f"{remaining} card to review" if remaining == 1
+            else f"{remaining} cards to review"
+        )
+
+    def review_early(self):
+        """Mostra subito la carta in attesa piu' vicina, senza aspettare."""
+        if not self.review_queue:
+            return
+        soonest = min(range(len(self.review_queue)),
+                      key=lambda i: self.review_queue[i].get("due_at", 0))
+        self.review_queue[soonest]["due_at"] = time.time()
+        self._show_next_review_card()
 
     def reveal_answer(self):
         self.answer_revealed = True
 
     def grade_card(self, grade):
-        """grade: 0=Di nuovo, 1=Difficile, 2=Bene, 3=Facile (SM-2 semplificato)."""
+        """grade: 0=Di nuovo, 1=Difficile, 2=Bene, 3=Facile. La carta torna dopo
+        il tempo scelto dall'utente per quella risposta."""
         if self.current_card_id is None:
             return
 
+        key = REVIEW_LABELS[grade][0]
+        delay = userdata.get_review_intervals(self.deck_con)[key]
         card = self.review_queue.pop(0)
-        ease_factor = card["ease_factor"]
-        interval = card["interval_days"]
-        repetitions = card["repetitions"]
-
-        if grade == 0:
-            repetitions = 0
-            interval = 0
-            ease_factor = max(1.3, ease_factor - 0.2)
-            # la rivedi di nuovo in questa stessa sessione
-            card["ease_factor"] = ease_factor
-            card["interval_days"] = interval
-            card["repetitions"] = repetitions
-            self.review_queue.append(card)
-        else:
-            if repetitions == 0:
-                interval = 1
-            elif repetitions == 1:
-                interval = 6
-            else:
-                interval = round(interval * ease_factor) or 1
-            repetitions += 1
-            if grade == 1:
-                ease_factor = max(1.3, ease_factor - 0.15)
-            elif grade == 3:
-                ease_factor = ease_factor + 0.15
-
-        due_date = (date.today() + timedelta(days=interval)).isoformat()
+        due_at = int(time.time() + delay)
+        repetitions = 0 if grade == 0 else card["repetitions"] + 1
+        interval_days = round(delay / 86400)  # solo indicativo, per i file di backup
+        due_date = datetime.fromtimestamp(due_at).date().isoformat()
 
         self.deck_con.execute(
-            "UPDATE deck SET due_date=?, interval_days=?, ease_factor=?, repetitions=? WHERE id=?",
-            (due_date, interval, ease_factor, repetitions, card["id"]),
+            "UPDATE deck SET due_date=?, due_at=?, interval_days=?, repetitions=? WHERE id=?",
+            (due_date, due_at, interval_days, repetitions, card["id"]),
         )
         self.deck_con.commit()
         self._schedule_autosave()
 
+        if delay <= LEARN_AHEAD_SECONDS:
+            # Torna presto: resta nella sessione e riappare quando e' scaduta.
+            card.update(due_at=due_at, repetitions=repetitions,
+                        interval_days=interval_days, learning=True)
+            self.review_queue.append(card)
+
         self._save_review_session()
         self._show_next_review_card()
 
+    # ---------- Impostazioni dei tempi di ripasso ----------
+    def _refresh_intervals_text(self):
+        intervals = userdata.get_review_intervals(self.deck_con)
+        self.review_intervals_text = "  ·  ".join(
+            f"{label} {userdata.format_interval(intervals[key])}" for key, label in REVIEW_LABELS
+        )
+
+    def _interval_rows(self):
+        ids = self.root.get_screen("reviewsettings").ids
+        return {"again": ids.row_again, "hard": ids.row_hard,
+                "good": ids.row_good, "easy": ids.row_easy}
+
+    def _fill_interval_rows(self, intervals):
+        for key, row in self._interval_rows().items():
+            number, unit = userdata.split_interval(intervals[key])
+            row.ids.value.text = str(number)
+            row.unit = unit
+
+    def open_review_settings(self):
+        self.review_settings_message = ""
+        self._fill_interval_rows(userdata.get_review_intervals(self.deck_con))
+        self.root.current = "reviewsettings"
+
+    def save_review_settings(self):
+        rows = self._interval_rows()
+        values = {}
+        for key, label in REVIEW_LABELS:
+            try:
+                values[key] = userdata.interval_seconds(rows[key].ids.value.text, rows[key].unit)
+            except ValueError:
+                self.review_settings_message = (
+                    f'"{label}": enter a whole number (0 to 3650 days).'
+                )
+                return
+        userdata.set_review_intervals(self.deck_con, values)
+        self._refresh_intervals_text()
+        self._schedule_autosave()  # i tempi sono nel file di backup del mazzo
+        self.review_settings_message = "Saved."
+
+    def reset_review_settings(self):
+        userdata.set_review_intervals(self.deck_con, userdata.DEFAULT_REVIEW_INTERVALS)
+        self._fill_interval_rows(userdata.DEFAULT_REVIEW_INTERVALS)
+        self._refresh_intervals_text()
+        self._schedule_autosave()
+        self.review_settings_message = "Default values restored."
+
+    def close_review_settings(self):
+        self._refresh_intervals_text()
+        self.root.current = "review"
 
 if __name__ == "__main__":
     FlashcardApp().run()
