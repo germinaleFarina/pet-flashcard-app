@@ -49,10 +49,10 @@ requirements = python3,kivy,kivymd==1.2.0,pyjnius
 # requirements.source.kivy = ../../kivy
 
 # (str) Presplash of the application
-presplash.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/presplash_black.png
 
 # (str) Icon of the application
-#icon.filename = %(source.dir)s/icon.png
+icon.filename = %(source.dir)s/icon.png
 
 # (list) Supported orientations
 # Valid options are: landscape, portrait, portrait-reverse, landscape-reverse, or all
@@ -89,7 +89,7 @@ fullscreen = 0
 # red, blue, green, black, white, gray, cyan, magenta, yellow, lightgray,
 # darkgray, grey, lightgrey, darkgrey, aqua, fuchsia, lime, maroon, navy,
 # olive, purple, silver, teal.
-android.presplash_color = #000000
+android.presplash_color = black
 
 # (string) Presplash animation using Lottie format.
 # see https://lottiefiles.com/ for examples and https://airbnb.design/lottie/
@@ -163,7 +163,7 @@ android.presplash_color = #000000
 #android.service_class_name = org.kivy.android.PythonService
 
 # (str) Android app theme, default is ok for Kivy-based app
-# android.apptheme = "@android:style/Theme.NoTitleBar"
+android.apptheme = @style/DigiVolTheme
 
 # (list) Pattern to whitelist for the whole project
 #android.whitelist =
@@ -206,7 +206,7 @@ android.presplash_color = #000000
 # 3) A directory, here 'legal_resources' must contain one or more directories, 
 # each of a resource kind:  drawable, xml, etc...
 # android.add_resources = legal_resources
-#android.add_resources =
+android.add_resources = res_overlay/digivol_theme.xml:values/digivol_theme.xml,res_overlay/digivol_theme_v31.xml:values-v31/digivol_theme.xml,res_overlay/digivol_splash_empty.xml:drawable/digivol_splash_empty.xml
 
 # (list) Gradle dependencies to add
 #android.gradle_dependencies =
