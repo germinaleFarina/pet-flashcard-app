@@ -77,6 +77,18 @@ Mazzi per categoria:
   modalita' selezione, spostare piu' carte in un colpo solo in un mazzo.
   I mazzi fanno parte del backup. Il ripasso, per ora, include tutti i mazzi.
 
+Fluidita':
+- All'avvio compare subito solo lo splash (con dissolvenza); le altre schermate
+  vengono preparate subito dopo, a una alla volta, mentre lo splash e' ancora
+  visibile. Cosi' i passaggi successivi sono immediati.
+- Nei passaggi tra schermate lo scorrimento segue la freccia: avanti la nuova
+  schermata entra da destra, indietro (freccia o tasto del telefono) entra da
+  sinistra. Dallo splash alla ricerca c'e' una dissolvenza.
+- La lista delle carte e' "virtuale" (RecycleView): disegna solo le righe
+  visibili, quindi resta fluida anche con migliaia di carte. Ha un filtro di
+  testo e un riepilogo ("12 of 340 cards"); "Select all" seleziona i risultati
+  del filtro, per spostarli in un mazzo con un tocco.
+
 Tempi di ripasso:
 - Per ognuna delle quattro risposte (Di nuovo, Difficile, Bene, Facile)
   l'utente sceglie dopo quanto la carta deve tornare (minuti, ore o giorni):
@@ -91,6 +103,10 @@ Poi avvia l'app (funziona anche su desktop per svilupparla/testarla):
     python main.py
 """
 
+import time as _clock_module
+
+PROCESS_IMPORT_TIME = _clock_module.time()  # inizio del caricamento: serve a misurare l'avvio
+
 import os
 import random
 import shutil
@@ -101,10 +117,12 @@ import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from kivy.animation import Animation
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.lang import Builder
-from kivy.properties import StringProperty, BooleanProperty
+from kivy.properties import BooleanProperty, NumericProperty, StringProperty
+from kivy.uix.screenmanager import FadeTransition, SlideTransition
 from kivy.uix.scrollview import ScrollView
 from kivy.utils import escape_markup, platform
 from kivymd.app import MDApp
@@ -120,7 +138,7 @@ from kivymd.uix.list import (
 
 import folder_storage
 import userdata
-from vocab_search import VocabSearcher
+from vocab_search import VocabSearcher, normalize
 
 # Cartella dove si trova main.py: qui viene bundlato il vocab.db "di fabbrica"
 # generato con import_vocab.py, sia sul desktop che dentro l'APK. Qui vive
@@ -132,7 +150,15 @@ BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 TODAY = date.today().isoformat()
 
 SEARCH_DEBOUNCE_SECONDS = 0.18
-SPLASH_DURATION_SECONDS = 8.0
+SPLASH_DURATION_SECONDS = 8.0       # tempo minimo di permanenza dello splash
+SPLASH_FADE_SECONDS = 0.7           # dissolvenza di ingresso dello splash
+SLIDE_SECONDS = 0.22                # scorrimento tra schermate
+FADE_SECONDS = 0.45                 # dissolvenza splash -> ricerca
+LIST_LOAD_DELAY_SECONDS = 0.26      # la lista si carica a scorrimento finito
+FILTER_DEBOUNCE_SECONDS = 0.25      # pausa di digitazione prima di filtrare
+CARD_TEXT_CLIP = 90                 # lunghezza massima dei testi nelle righe della lista
+# Ordine in cui le schermate vengono preparate dopo l'avvio.
+WARM_SCREENS = ("search", "deck", "review", "form", "data", "decks", "reviewsettings")
 
 DE_HINT = "Search a German word..."
 EN_HINT = "Search an English word..."
@@ -201,13 +227,6 @@ def format_meta(word_type, gender):
 KV = """
 ScreenManager:
     SplashScreen:
-    SearchScreen:
-    DeckScreen:
-    ReviewScreen:
-    FormScreen:
-    DataScreen:
-    DecksScreen:
-    ReviewSettingsScreen:
 
 <SplashScreen>:
     name: "splash"
@@ -221,12 +240,16 @@ ScreenManager:
             size_hint_y: 0.3
 
         Image:
+            id: splash_logo
+            opacity: 0
             source: "icon.png"
             size_hint: None, None
             size: "250dp", "250dp"
             pos_hint: {"center_x": 0.5}
 
         MDLabel:
+            id: splash_title
+            opacity: 0
             text: "DigiVol"
             halign: "center"
             theme_text_color: "Custom"
@@ -238,6 +261,8 @@ ScreenManager:
             height: self.texture_size[1] + dp(4)
 
         MDLabel:
+            id: splash_tagline
+            opacity: 0
             text: "your minimalist digital vocabulary"
             halign: "center"
             theme_text_color: "Custom"
@@ -252,6 +277,8 @@ ScreenManager:
             size_hint_y: 0.3
 
         MDLabel:
+            id: splash_credit
+            opacity: 0
             text: "Powered and Developed by Germinale Shinoda"
             halign: "center"
             theme_text_color: "Custom"
@@ -470,6 +497,16 @@ ScreenManager:
                         text: "Clear"
                         on_release: app.clear_diagnostics()
 
+<CardRow>:
+    IconRightWidget:
+        icon: "trash-can-outline"
+        on_release: app.delete_flashcard(root.card_id)
+
+<CardSelectRow>:
+    on_release: app.toggle_card_selected(root.card_id)
+    IconLeftWidgetWithoutTouch:
+        icon: "checkbox-marked" if root.selected else "checkbox-blank-outline"
+
 <DeckScreen>:
     name: "deck"
     MDBoxLayout:
@@ -482,6 +519,19 @@ ScreenManager:
             left_action_items: [["arrow-left", lambda x: app.go_to_search()]]
             right_action_items: [["filter-variant", lambda x: app.open_decks("view")], ["checkbox-multiple-marked-outline", lambda x: app.toggle_select_mode()]]
 
+        MDTextField:
+            id: card_filter
+            hint_text: "Filter cards"
+            mode: "rectangle"
+            on_text: app.on_card_filter(self.text)
+
+        MDLabel:
+            text: app.deck_summary
+            halign: "center"
+            theme_text_color: "Secondary"
+            font_style: "Caption"
+            adaptive_height: True
+
         MDLabel:
             text: app.deck_message
             halign: "center"
@@ -489,9 +539,15 @@ ScreenManager:
             font_style: "Caption"
             adaptive_height: True
 
-        ScrollView:
-            MDList:
-                id: deck_list
+        RecycleView:
+            id: deck_rv
+            viewclass: "CardRow"
+            RecycleBoxLayout:
+                default_size: None, dp(72)
+                default_size_hint: 1, None
+                size_hint_y: None
+                height: self.minimum_height
+                orientation: "vertical"
 
         MDBoxLayout:
             size_hint_y: None
@@ -744,6 +800,17 @@ class ReviewSettingsScreen(MDScreen):
     pass
 
 
+class CardRow(TwoLineRightIconListItem):
+    """Riga della lista delle carte (modalita' normale: cestino a destra)."""
+    card_id = NumericProperty(0)
+
+
+class CardSelectRow(TwoLineAvatarIconListItem):
+    """Riga della lista delle carte in modalita' selezione (casella a sinistra)."""
+    card_id = NumericProperty(0)
+    selected = BooleanProperty(False)
+
+
 class IntervalRow(MDBoxLayout):
     """Una riga della schermata dei tempi: nome della risposta, numero e unita'."""
     title = StringProperty("")
@@ -752,6 +819,20 @@ class IntervalRow(MDBoxLayout):
     def cycle_unit(self):
         names = [name for name, _factor in userdata.INTERVAL_UNITS]
         self.unit = names[(names.index(self.unit) + 1) % len(names)]
+
+
+# Le schermate (tranne lo splash) si creano dopo l'avvio, una alla volta.
+SCREEN_CLASSES = {
+    "search": SearchScreen, "deck": DeckScreen, "review": ReviewScreen,
+    "form": FormScreen, "data": DataScreen, "decks": DecksScreen,
+    "reviewsettings": ReviewSettingsScreen,
+}
+
+
+def _clip(text, limit=CARD_TEXT_CLIP):
+    """Accorcia un testo per la riga di una lista (a due righe, altezza fissa)."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 class FlashcardApp(MDApp):
@@ -802,11 +883,22 @@ class FlashcardApp(MDApp):
     deck_message = StringProperty("")
     select_mode = BooleanProperty(False)
     selection_text = StringProperty("")
+    deck_summary = StringProperty("")
     target_deck_id = None          # None = mazzo Default
     _deck_filter = "all"           # "all", None (Default) oppure id categoria
     _selected_card_ids = None
     _visible_card_ids = None
-    _select_icons = None
+    _row_index = None              # id carta -> posizione nella lista
+    _card_filter_text = ""
+    _deck_total = 0
+    _deck_load_event = None
+    _slide = None
+    _fade = None
+    _timings = None
+    _splash_elapsed = False
+    _screens_ready = False
+    _splash_done = False
+    _warm_index = 0
     _dialog = None
     _dialog_open = False
 
@@ -860,6 +952,8 @@ class FlashcardApp(MDApp):
         return layout
 
     def _build_app(self):
+        build_started = time.time()
+        Window.clearcolor = (0, 0, 0, 1)  # nero fin dal primo istante: nessun lampo chiaro
 
         # Con la tastiera aperta, sposta lo schermo quanto basta a tenere
         # visibile il campo in cui si sta scrivendo (moduli).
@@ -881,7 +975,8 @@ class FlashcardApp(MDApp):
         data_dir.mkdir(parents=True, exist_ok=True)
         self._selected_card_ids = set()
         self._visible_card_ids = []
-        self._select_icons = {}
+        self._row_index = {}
+        self._timings = {}
         self._setup_diagnostics(data_dir)
         self.vocab_db_path = data_dir / "vocab.db"
         self.deck_db_path = data_dir / "deck.db"
@@ -929,20 +1024,73 @@ class FlashcardApp(MDApp):
         self.searcher = VocabSearcher(self.vocab_con)
         self._init_backup_storage()
         self._load_target_deck()
+        # Qui si crea SOLO lo splash: il resto viene preparato dopo il primo
+        # fotogramma (vedi on_start), cosi' la schermata iniziale compare subito.
         self.root = Builder.load_string(KV)
+        self._slide = SlideTransition(duration=SLIDE_SECONDS)
+        self._fade = FadeTransition(duration=FADE_SECONDS)
+        self.root.transition = self._slide
         # Tasto "indietro" di Android (e ESC sul desktop): schermata precedente.
         Window.bind(on_keyboard=self._on_back_key)
         self._refresh_deck_count()
-
-        # Mostra la schermata di avvio (logo + nome + slogan) per un tempo
-        # fisso, poi passa automaticamente alla ricerca.
-        Clock.schedule_once(lambda dt: self.go_to_search(), SPLASH_DURATION_SECONDS)
-
-        # Mentre l'utente guarda la schermata iniziale, prepara in memoria
-        # l'elenco usato per correggere i refusi (qualche decina di ms).
-        Clock.schedule_once(lambda dt: self.searcher.warm_up(False), 1.0)
-
+        self._timings["build_ms"] = round((time.time() - build_started) * 1000)
+        self._timings["import_to_build_end_ms"] = round((time.time() - PROCESS_IMPORT_TIME) * 1000)
         return self.root
+
+    # ---------- Avvio a fasi: splash subito, il resto subito dopo ----------
+    def on_start(self):
+        if not hasattr(self.root, "has_screen"):
+            return  # l'avvio e' fallito: c'e' la schermata d'errore
+        self._splash_elapsed = self._screens_ready = self._splash_done = False
+        self._warm_index = 0
+        self._animate_splash()
+        # Le schermate si preparano a dissolvenza finita, una per volta, mentre
+        # lo splash e' fermo: eventuali piccoli rallentamenti non si vedono.
+        Clock.schedule_once(lambda dt: self._warm_next_screen(), SPLASH_FADE_SECONDS + 0.2)
+        Clock.schedule_once(lambda dt: self._on_splash_time(), SPLASH_DURATION_SECONDS)
+
+    def _animate_splash(self):
+        ids = self.root.get_screen("splash").ids
+        for delay, name in ((0.0, "splash_logo"), (0.15, "splash_title"),
+                            (0.30, "splash_tagline"), (0.55, "splash_credit")):
+            widget = ids[name]
+            fade_in = lambda dt, w=widget: Animation(  # noqa: E731
+                opacity=1, duration=SPLASH_FADE_SECONDS, t="out_quad").start(w)
+            if delay:
+                Clock.schedule_once(fade_in, delay)
+            else:
+                fade_in(0)
+
+    def _warm_next_screen(self):
+        if self._warm_index < len(WARM_SCREENS):
+            try:
+                self._ensure_screen(WARM_SCREENS[self._warm_index])
+            except Exception as exc:  # noqa: BLE001 - verra' creata al primo uso
+                self._log_error("prepare screens", exc)
+            self._warm_index += 1
+        if self._warm_index < len(WARM_SCREENS):
+            Clock.schedule_once(lambda dt: self._warm_next_screen(), 0.04)
+            return
+        self._screens_ready = True
+        self._timings["screens_ready_ms"] = round((time.time() - PROCESS_IMPORT_TIME) * 1000)
+        # Elenco per correggere i refusi: in un thread, senza fermare l'interfaccia.
+        self.searcher.warm_up_async(False)
+        self._maybe_finish_splash()
+
+    def _on_splash_time(self):
+        self._splash_elapsed = True
+        self._maybe_finish_splash()
+
+    def _maybe_finish_splash(self):
+        """Si passa alla ricerca (con dissolvenza) quando il tempo dello splash
+        e' trascorso E le schermate sono pronte."""
+        if self._splash_elapsed and self._screens_ready and not self._splash_done:
+            self._splash_done = True
+            try:
+                self._go("search", fade=True)
+            except Exception as exc:  # noqa: BLE001
+                self._log_error("leave splash", exc)
+                self.root.current = "search"
 
     # ---------- Tasto indietro ----------
     def _on_back_key(self, window, key, *args):
@@ -1083,7 +1231,7 @@ class FlashcardApp(MDApp):
         self.current_word = ""
         self.current_translation = ""
         self.current_meta = ""
-        search_screen = self.root.get_screen("search")
+        search_screen = self._screen("search")
         search_screen.ids.search_field.text = ""
         search_screen.ids.suggestions_list.clear_widgets()
 
@@ -1098,7 +1246,7 @@ class FlashcardApp(MDApp):
         )
 
     def _run_search(self, text):
-        suggestions_list = self.root.get_screen("search").ids.suggestions_list
+        suggestions_list = self._screen("search").ids.suggestions_list
         suggestions_list.clear_widgets()
         self.current_word = ""
         self.current_translation = ""
@@ -1152,7 +1300,7 @@ class FlashcardApp(MDApp):
 
     # ---------- Moduli: correzioni e voci personali ----------
     def _form_ids(self):
-        return self.root.get_screen("form").ids
+        return self._screen("form").ids
 
     def _open_form(self, mode, title, word="", translation="", word_type=None, gender=None):
         ids = self._form_ids()
@@ -1165,7 +1313,7 @@ class FlashcardApp(MDApp):
         self._form_type_idx = userdata.TYPE_VALUES.index(userdata.canon_meta(word_type) or "")
         self._form_gender_idx = userdata.GENDER_VALUES.index(userdata.canon_meta(gender) or "")
         self._refresh_form_labels()
-        self.root.current = "form"
+        self._go("form")
 
     def _refresh_form_labels(self):
         type_value = userdata.TYPE_VALUES[self._form_type_idx]
@@ -1194,12 +1342,12 @@ class FlashcardApp(MDApp):
     def open_new_entry_form(self):
         # Se l'utente aveva digitato qualcosa nella ricerca, lo usa come
         # punto di partenza (parola tedesca, o traduzione in modalita' EN).
-        typed = self.root.get_screen("search").ids.search_field.text.strip()
+        typed = self._screen("search").ids.search_field.text.strip()
         word, translation = ("", typed) if self.reversed_search else (typed, "")
         self._open_form("entry", "Add my own entry", word, translation)
 
     def cancel_form(self):
-        self.root.current = "search"
+        self._go("search", back=True)
 
     def save_form(self):
         ids = self._form_ids()
@@ -1238,10 +1386,10 @@ class FlashcardApp(MDApp):
             return
 
         in_folder = self._backup_extras_quietly()
-        self.root.current = "search"
+        self._go("search", back=True)
         if self.form_mode == "entry":
             # Mostra subito la nuova voce nei risultati.
-            self.root.get_screen("search").ids.search_field.text = (
+            self._screen("search").ids.search_field.text = (
                 translation if self.reversed_search else word
             )
         self._flash_status(
@@ -1304,6 +1452,7 @@ class FlashcardApp(MDApp):
             f"python: {sys.version.split()[0]}\nvocab version: {vocab_version}\n"
             f"backup folder: {folder_storage.describe_spec(self._storage_spec) or 'none'}\n"
             f"automatic backup paused: {self._storage_blocked}\n"
+            f"startup timings (ms): {self._timings}\n"
         )
         return header + "\n" + self._read_tail(self._log_path, 8000)
 
@@ -1401,7 +1550,7 @@ class FlashcardApp(MDApp):
 
     def go_to_data(self):
         self._update_backup_texts()
-        self.root.current = "data"
+        self._go("data")
 
     def choose_backup_folder(self):
         if platform == "android":
@@ -1590,6 +1739,42 @@ class FlashcardApp(MDApp):
         self.status_text = f"Local deck: {count} cards"
 
     # ---------- Navigazione ----------
+    # ---------- Navigazione e transizioni ----------
+    def _ensure_screen(self, name):
+        if not self.root.has_screen(name):
+            self.root.add_widget(SCREEN_CLASSES[name]())
+
+    def _screen(self, name):
+        """La schermata 'name', creata al volo se non e' ancora pronta."""
+        self._ensure_screen(name)
+        return self.root.get_screen(name)
+
+    def _go(self, name, back=False, fade=False):
+        """Cambia schermata con lo scorrimento giusto. Avanti: la nuova schermata
+        entra da destra. Indietro: entra da sinistra, nel verso della freccia
+        indietro (la stessa cosa con la freccia in alto e con il tasto del
+        telefono). fade=True: dissolvenza."""
+        self._ensure_screen(name)
+        if self.root.current == name:
+            return
+        if fade:
+            self.root.transition = self._fade
+        else:
+            self._slide.direction = "right" if back else "left"
+            self.root.transition = self._slide
+        self.root.current = name
+
+    def go_to_search(self):
+        self._cancel_review_timer()
+        self._go("search", back=True)
+
+    def go_to_review(self):
+        self._load_review_queue()
+        self._refresh_intervals_text()
+        self._go("review")
+        self._show_next_review_card()
+
+    # ---------- Lista delle carte (virtuale: disegna solo le righe visibili) ----------
     def go_to_deck(self):
         # Ingresso dalla schermata di ricerca: parte sempre da "tutte le carte".
         self._deck_filter = "all"
@@ -1597,64 +1782,87 @@ class FlashcardApp(MDApp):
         self._selected_card_ids = set()
         self.selection_text = ""
         self.deck_message = ""
-        self._show_deck_screen()
+        self._card_filter_text = ""
+        self._screen("deck").ids.card_filter.text = ""
+        self._show_deck_screen(back=False)
 
-    def _show_deck_screen(self):
-        self._populate_deck_screen()
-        self.root.current = "deck"
+    def _show_deck_screen(self, back=True):
+        """Mostra la schermata e carica la lista a scorrimento finito, cosi' lo
+        scorrimento parte subito e non scatta."""
+        self.deck_summary = "Loading…"
+        self._go("deck", back=back)
+        self._schedule_deck_load(LIST_LOAD_DELAY_SECONDS)
 
-    def go_to_search(self):
-        self._cancel_review_timer()
-        self.root.current = "search"
+    def _schedule_deck_load(self, delay):
+        if self._deck_load_event is not None:
+            self._deck_load_event.cancel()
+        self._deck_load_event = Clock.schedule_once(
+            lambda dt: self._populate_deck_screen(), delay
+        )
 
-    def go_to_review(self):
-        self._load_review_queue()
-        self._refresh_intervals_text()
-        self.root.current = "review"
-        self._show_next_review_card()
+    def on_card_filter(self, text):
+        """Il testo del filtro e' cambiato: aggiorna la lista dopo una breve pausa."""
+        if text == self._card_filter_text:
+            return
+        self._card_filter_text = text
+        self._schedule_deck_load(FILTER_DEBOUNCE_SECONDS)
+
+    def _deck_rows(self):
+        flt = self._deck_filter
+        needle = normalize(self._card_filter_text)
+        where, params = [], []
+        if flt is None:
+            where.append("d.category_id IS NULL")
+        elif flt != "all":
+            where.append("d.category_id = ?")
+            params.append(flt)
+        total_sql = "SELECT COUNT(*) FROM deck d" + (" WHERE " + where[0] if where else "")
+        self._deck_total = self.deck_con.execute(total_sql, params).fetchone()[0]
+        if needle:
+            where.append("d.search_text LIKE ?")
+            params.append(f"%{needle}%")
+        sql = ("SELECT d.id, d.front, d.back, c.name FROM deck d "
+               "LEFT JOIN categories c ON d.category_id = c.id"
+               + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY d.id DESC")
+        return self.deck_con.execute(sql, params).fetchall(), bool(needle)
 
     def _populate_deck_screen(self):
-        deck_list = self.root.get_screen("deck").ids.deck_list
-        deck_list.clear_widgets()
+        self._deck_load_event = None
+        rv = self._screen("deck").ids.deck_rv
+        userdata.ensure_search_text(self.deck_con)  # solo la prima volta
+        rows, filtered = self._deck_rows()
         flt = self._deck_filter
-        sql = ("SELECT d.id, d.front, d.back, c.name FROM deck d "
-               "LEFT JOIN categories c ON d.category_id = c.id")
-        params = ()
-        if flt is None:
-            sql += " WHERE d.category_id IS NULL"
-        elif flt != "all":
-            sql += " WHERE d.category_id = ?"
-            params = (flt,)
-        rows = self.deck_con.execute(sql + " ORDER BY d.id DESC", params).fetchall()
-
+        select = self.select_mode
+        data = []
+        for card_id, front, back, card_deck in rows:
+            # Nella vista "tutte le carte" indica il mazzo delle carte categorizzate.
+            secondary = back if (card_deck is None or flt != "all") else f"{back}  ·  {card_deck}"
+            item = {"text": _clip(front), "secondary_text": _clip(secondary), "card_id": card_id}
+            if select:
+                item["selected"] = card_id in self._selected_card_ids
+            data.append(item)
+        rv.viewclass = "CardSelectRow" if select else "CardRow"
+        rv.data = data
+        self._row_index = {item["card_id"]: i for i, item in enumerate(data)}
+        self._visible_card_ids = [item["card_id"] for item in data]
         self.deck_view_title = (
             "Your cards" if flt == "all"
             else f"Cards: {userdata.deck_name(self.deck_con, flt)}"
         )
-        self._visible_card_ids = [r[0] for r in rows]
-        self._select_icons = {}
-        for card_id, front, back, card_deck in rows:
-            # Nella vista "tutte le carte" indica il mazzo delle carte categorizzate.
-            secondary = back if (card_deck is None or flt != "all") else f"{back}  ·  {card_deck}"
-            if self.select_mode:
-                item = TwoLineAvatarIconListItem(
-                    text=front, secondary_text=secondary,
-                    on_release=lambda inst, cid=card_id: self.toggle_card_selected(cid),
-                )
-                icon = IconLeftWidgetWithoutTouch(
-                    icon="checkbox-marked" if card_id in self._selected_card_ids
-                    else "checkbox-blank-outline"
-                )
-                item.add_widget(icon)
-                self._select_icons[card_id] = icon
-            else:
-                item = TwoLineRightIconListItem(text=front, secondary_text=secondary)
-                delete_icon = IconRightWidget(icon="trash-can-outline")
-                delete_icon.bind(
-                    on_release=lambda inst, cid=card_id: self.delete_flashcard(cid)
-                )
-                item.add_widget(delete_icon)
-            deck_list.add_widget(item)
+        self._refresh_deck_summary(filtered)
+
+    def _refresh_deck_summary(self, filtered=None):
+        shown = len(self._visible_card_ids)
+        if filtered is None:
+            filtered = bool(normalize(self._card_filter_text))
+        if shown == 0:
+            self.deck_summary = ("No cards match your filter." if filtered
+                                 else "No cards here yet.")
+        elif filtered or shown != self._deck_total:
+            self.deck_summary = f"{shown} of {self._deck_total} cards"
+        else:
+            self.deck_summary = f"{shown} card{'' if shown == 1 else 's'}"
 
     def delete_flashcard(self, card_id):
         self.deck_con.execute("DELETE FROM deck WHERE id = ?", (card_id,))
@@ -1662,7 +1870,15 @@ class FlashcardApp(MDApp):
         self._selected_card_ids.discard(card_id)
         self._schedule_autosave()
         self._refresh_deck_count()
-        self._populate_deck_screen()
+        index = self._row_index.get(card_id)
+        if index is not None:
+            rv = self._screen("deck").ids.deck_rv
+            del rv.data[index]                       # toglie solo quella riga
+            self._row_index = {item["card_id"]: i for i, item in enumerate(rv.data)}
+            self._visible_card_ids = list(self._row_index)
+            self._deck_total = max(0, self._deck_total - 1)
+            rv.refresh_from_data()
+            self._refresh_deck_summary()
 
     # ---------- Selezione multipla di carte ----------
     def _update_selection_text(self):
@@ -1679,27 +1895,32 @@ class FlashcardApp(MDApp):
             self.selection_text = ""
         self._populate_deck_screen()
 
+    def _mark_rows(self, card_ids):
+        """Aggiorna la casella delle righe indicate (senza ricostruire la lista)."""
+        rv = self._screen("deck").ids.deck_rv
+        for card_id in card_ids:
+            index = self._row_index.get(card_id)
+            if index is not None:
+                rv.data[index]["selected"] = card_id in self._selected_card_ids
+        rv.refresh_from_data()
+
     def toggle_card_selected(self, card_id):
         if card_id in self._selected_card_ids:
             self._selected_card_ids.discard(card_id)
         else:
             self._selected_card_ids.add(card_id)
-        icon = self._select_icons.get(card_id)
-        if icon is not None:
-            icon.icon = ("checkbox-marked" if card_id in self._selected_card_ids
-                         else "checkbox-blank-outline")
+        self._mark_rows([card_id])
         self._update_selection_text()
 
     def select_all_cards(self):
-        """Seleziona tutte le carte mostrate; se lo sono gia' tutte, le deseleziona."""
+        """Seleziona tutte le carte mostrate (quindi anche solo i risultati del
+        filtro); se lo sono gia' tutte, le deseleziona."""
         visible = set(self._visible_card_ids)
         if visible and visible <= self._selected_card_ids:
             self._selected_card_ids -= visible
         else:
             self._selected_card_ids |= visible
-        for card_id, icon in self._select_icons.items():
-            icon.icon = ("checkbox-marked" if card_id in self._selected_card_ids
-                         else "checkbox-blank-outline")
+        self._mark_rows(self._visible_card_ids)
         self._update_selection_text()
 
     # ---------- Mazzi per categoria ----------
@@ -1733,10 +1954,10 @@ class FlashcardApp(MDApp):
         }[mode]
         self.decks_message = ""
         self._populate_decks_screen()
-        self.root.current = "decks"
+        self._go("decks")
 
     def _populate_decks_screen(self):
-        decks_list = self.root.get_screen("decks").ids.decks_list
+        decks_list = self._screen("decks").ids.decks_list
         decks_list.clear_widgets()
         decks = userdata.list_decks(self.deck_con)
         entries = []
@@ -1768,7 +1989,7 @@ class FlashcardApp(MDApp):
         name = "All cards" if deck_id == "all" else userdata.deck_name(self.deck_con, deck_id)
         if self.decks_mode == "target":
             self._set_target_deck(deck_id)
-            self.root.current = "search"
+            self._go("search", back=True)
             self._flash_status(f"New cards will go to: {name}", duration=2.5)
         elif self.decks_mode == "move":
             moved = userdata.move_cards(self.deck_con, self._selected_card_ids, deck_id)
@@ -1785,12 +2006,12 @@ class FlashcardApp(MDApp):
 
     def decks_back(self):
         if self.decks_mode == "target":
-            self.root.current = "search"
+            self._go("search", back=True)
         else:
-            self._show_deck_screen()
+            self._show_deck_screen(back=True)
 
     def create_deck_from_field(self):
-        field = self.root.get_screen("decks").ids.new_deck_name
+        field = self._screen("decks").ids.new_deck_name
         try:
             new_id = userdata.create_deck(self.deck_con, field.text)
         except ValueError as exc:
@@ -2097,7 +2318,7 @@ class FlashcardApp(MDApp):
         )
 
     def _interval_rows(self):
-        ids = self.root.get_screen("reviewsettings").ids
+        ids = self._screen("reviewsettings").ids
         return {"again": ids.row_again, "hard": ids.row_hard,
                 "good": ids.row_good, "easy": ids.row_easy}
 
@@ -2110,7 +2331,7 @@ class FlashcardApp(MDApp):
     def open_review_settings(self):
         self.review_settings_message = ""
         self._fill_interval_rows(userdata.get_review_intervals(self.deck_con))
-        self.root.current = "reviewsettings"
+        self._go("reviewsettings")
 
     def save_review_settings(self):
         rows = self._interval_rows()
@@ -2137,7 +2358,7 @@ class FlashcardApp(MDApp):
 
     def close_review_settings(self):
         self._refresh_intervals_text()
-        self.root.current = "review"
+        self._go("review", back=True)
 
 if __name__ == "__main__":
     FlashcardApp().run()

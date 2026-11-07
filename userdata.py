@@ -129,6 +129,11 @@ def init_user_tables(con):
                 (_midnight_epoch(old_date), old_date),
             )
         con.execute("CREATE INDEX IF NOT EXISTS idx_deck_due_at ON deck (due_at)")
+        # Testo normalizzato (senza maiuscole/accenti) di fronte+retro: serve al
+        # filtro della lista delle carte. Si riempie al primo uso, vedi
+        # ensure_search_text().
+        if "search_text" not in deck_cols:
+            con.execute("ALTER TABLE deck ADD COLUMN search_text TEXT")
     con.commit()
 
 
@@ -307,16 +312,40 @@ def merge_deck_text(con, text):
             due_at = _midnight_epoch(due_date)
         con.execute(
             "INSERT INTO deck (front, back, due_date, interval_days, ease_factor, "
-            "repetitions, category_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "repetitions, category_id, due_at, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (front, back, due_date,
              _as_int(rec.get("interval"), 0, 0, 36500),
              _as_float(rec.get("ease"), 2.5, 1.3, 5.0),
              _as_int(rec.get("reps"), 0, 0, 100000),
-             category_id, due_at),
+             category_id, due_at, card_search_text(front, back)),
         )
         added += 1
     con.commit()
     return added, skipped, bad
+
+
+# ---------------------------------------------------------------------------
+# Ricerca nelle carte
+# ---------------------------------------------------------------------------
+
+def card_search_text(front, back):
+    return normalize(f"{front} {back}")
+
+
+def ensure_search_text(con):
+    """Riempie search_text per le carte che non ce l'hanno (carte create prima
+    di questa funzione). Di norma non fa nulla; la prima volta, su un mazzo
+    grande, richiede una frazione di secondo. -> numero di carte aggiornate."""
+    pending = con.execute(
+        "SELECT id, front, back FROM deck WHERE search_text IS NULL"
+    ).fetchall()
+    if pending:
+        con.executemany(
+            "UPDATE deck SET search_text = ? WHERE id = ?",
+            [(card_search_text(front, back), cid) for cid, front, back in pending],
+        )
+        con.commit()
+    return len(pending)
 
 
 # ---------------------------------------------------------------------------

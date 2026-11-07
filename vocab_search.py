@@ -24,6 +24,8 @@ Come vengono trattati gli spazi
 
 import bisect
 import re
+import sqlite3
+import threading
 import time
 import unicodedata
 
@@ -226,6 +228,8 @@ class VocabSearcher:
     def __init__(self, con):
         self.con = con
         self._fuzzy = {}
+        self._lock = threading.Lock()
+        self._generation = 0   # sale ad ogni reset(): scarta indici costruiti "prima"
 
     @classmethod
     def check_schema(cls, con):
@@ -245,17 +249,55 @@ class VocabSearcher:
     def reset(self):
         """Da chiamare quando il contenuto di vocab cambia (es. voce
         personale aggiunta): l'elenco per i refusi verra' ricostruito."""
-        self._fuzzy.clear()
+        with self._lock:
+            self._generation += 1
+            self._fuzzy.clear()
 
     def warm_up(self, reversed_search=False):
-        """Costruisce in anticipo l'indice per i refusi (pensato per essere
-        chiamato mentre l'utente guarda la schermata iniziale)."""
+        """Costruisce in anticipo l'indice per i refusi (bloccando chi chiama)."""
         self._fuzzy_index(self.column(reversed_search))
 
+    def warm_up_async(self, reversed_search=False):
+        """Come warm_up, ma in un thread con una connessione propria: l'interfaccia
+        (animazione dello splash) non si ferma. Se l'indice serve prima che sia
+        pronto, la ricerca lo costruisce da sola. Restituisce il thread (o None)."""
+        col = self.column(reversed_search)
+        if col in self._fuzzy:
+            return None
+        path = next((row[2] for row in self.con.execute("PRAGMA database_list")
+                     if row[1] == "main"), "")
+        if not path:                       # database in memoria: niente thread
+            self._fuzzy_index(col)
+            return None
+        generation = self._generation
+
+        def work():
+            try:
+                con = sqlite3.connect(path)
+                try:
+                    index = _FuzzyIndex(con, col)
+                finally:
+                    con.close()
+                with self._lock:
+                    if generation == self._generation:   # il dizionario non e' cambiato
+                        self._fuzzy.setdefault(col, index)
+            except Exception:  # noqa: BLE001 - e' solo un'ottimizzazione
+                pass
+
+        thread = threading.Thread(target=work, name="fuzzy-index", daemon=True)
+        thread.start()
+        return thread
+
     def _fuzzy_index(self, col):
-        if col not in self._fuzzy:
-            self._fuzzy[col] = _FuzzyIndex(self.con, col)
-        return self._fuzzy[col]
+        with self._lock:
+            index = self._fuzzy.get(col)
+            generation = self._generation
+        if index is None:
+            index = _FuzzyIndex(self.con, col)
+            with self._lock:
+                if generation == self._generation:
+                    index = self._fuzzy.setdefault(col, index)
+        return index
 
     # ----- interpretazione del testo digitato -----
     @staticmethod
