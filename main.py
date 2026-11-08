@@ -77,6 +77,14 @@ Mazzi per categoria:
   modalita' selezione, spostare piu' carte in un colpo solo in un mazzo.
   I mazzi fanno parte del backup. Il ripasso, per ora, include tutti i mazzi.
 
+Avvio senza stacchi:
+- Su Android, mentre Python parte (qualche secondo, inevitabile), si vede il
+  "presplash" nativo. Qui e' un'immagine nera con il LOGO al centro (la genera
+  apply_splash_fix.py a partire da icon.png). Lo splash di Kivy mette il logo
+  ESATTAMENTE nello stesso punto e della stessa dimensione (costanti
+  PRESPLASH_*), quindi il passaggio non si vede: il logo resta fermo e sfumano
+  solo le scritte. Poi dissolvenza verso la ricerca.
+
 Fluidita':
 - All'avvio compare subito solo lo splash (con dissolvenza); le altre schermate
   vengono preparate subito dopo, a una alla volta, mentre lo splash e' ancora
@@ -117,7 +125,7 @@ import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from kivy.animation import Animation
+from kivy.animation import Animation, AnimationTransition
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.lang import Builder
@@ -150,10 +158,18 @@ BUNDLED_VOCAB_DB = APP_DIR / "vocab.db"
 TODAY = date.today().isoformat()
 
 SEARCH_DEBOUNCE_SECONDS = 0.18
-SPLASH_DURATION_SECONDS = 8.0       # tempo minimo di permanenza dello splash
-SPLASH_FADE_SECONDS = 0.7           # dissolvenza di ingresso dello splash
-SLIDE_SECONDS = 0.22                # scorrimento tra schermate
-FADE_SECONDS = 0.45                 # dissolvenza splash -> ricerca
+SPLASH_DURATION_SECONDS = 2.5       # permanenza dello splash, dal momento in cui Python e' pronto
+SPLASH_FADE_SECONDS = 0.6           # dissolvenza delle scritte dello splash
+SLIDE_SECONDS = 0.26                # scorrimento tra schermate (con decelerazione)
+FADE_SECONDS = 0.5                  # dissolvenza splash -> ricerca
+# Presplash nativo: immagine di PRESPLASH_CANVAS_W x PRESPLASH_CANVAS_H pixel con
+# il logo largo PRESPLASH_LOGO_PX al centro. Android la adatta allo schermo
+# mantenendo le proporzioni; lo splash di Kivy usa la stessa regola per mettere
+# il logo nello stesso identico punto. apply_splash_fix.py legge questi valori
+# da qui, e il KV qui sotto ha le stesse tre cifre nelle righe "#:set".
+PRESPLASH_CANVAS_W = 1080
+PRESPLASH_CANVAS_H = 2400
+PRESPLASH_LOGO_PX = 750
 LIST_LOAD_DELAY_SECONDS = 0.26      # la lista si carica a scorrimento finito
 FILTER_DEBOUNCE_SECONDS = 0.25      # pausa di digitazione prima di filtrare
 CARD_TEXT_CLIP = 90                 # lunghezza massima dei testi nelle righe della lista
@@ -225,27 +241,25 @@ def format_meta(word_type, gender):
 
 
 KV = """
+#:set PRESPLASH_W 1080.0
+#:set PRESPLASH_H 2400.0
+#:set PRESPLASH_LOGO 750.0
+
 ScreenManager:
     SplashScreen:
 
 <SplashScreen>:
     name: "splash"
-    MDBoxLayout:
-        orientation: "vertical"
-        md_bg_color: 0, 0, 0, 1
-        padding: "24dp"
-        spacing: "16dp"
-
-        Widget:
-            size_hint_y: 0.3
-
+    md_bg_color: 0, 0, 0, 1
+    FloatLayout:
+        # Il logo sta al centro e ha la stessa dimensione e posizione del logo
+        # del presplash nativo (stessa regola di adattamento: tutto in scala).
         Image:
             id: splash_logo
-            opacity: 0
             source: "icon.png"
             size_hint: None, None
-            size: "250dp", "250dp"
-            pos_hint: {"center_x": 0.5}
+            size: [PRESPLASH_LOGO * min(root.width / PRESPLASH_W, root.height / PRESPLASH_H)] * 2
+            pos_hint: {"center_x": 0.5, "center_y": 0.5}
 
         MDLabel:
             id: splash_title
@@ -257,8 +271,11 @@ ScreenManager:
             font_style: "H3"
             font_name: "Roboto-Bold"
             bold: True
-            size_hint_y: None
+            size_hint: None, None
+            width: root.width
             height: self.texture_size[1] + dp(4)
+            x: root.x
+            y: splash_logo.y - self.height - dp(8)
 
         MDLabel:
             id: splash_tagline
@@ -270,11 +287,11 @@ ScreenManager:
             font_style: "Subtitle1"
             font_name: "Roboto"
             font_size: "18sp"
-            size_hint_y: None
+            size_hint: None, None
+            width: root.width
             height: self.texture_size[1]
-
-        Widget:
-            size_hint_y: 0.3
+            x: root.x
+            y: splash_title.y - self.height - dp(4)
 
         MDLabel:
             id: splash_credit
@@ -284,8 +301,11 @@ ScreenManager:
             theme_text_color: "Custom"
             text_color: 0.4, 0.4, 0.4, 1
             font_style: "Caption"
-            size_hint_y: None
+            size_hint: None, None
+            width: root.width
             height: self.texture_size[1] + dp(8)
+            x: root.x
+            y: dp(24)
 
 <SearchScreen>:
     name: "search"
@@ -821,6 +841,21 @@ class IntervalRow(MDBoxLayout):
         self.unit = names[(names.index(self.unit) + 1) % len(names)]
 
 
+class EasedSlideTransition(SlideTransition):
+    """Scorrimento con decelerazione (parte veloce, si ferma dolcemente): al posto
+    del movimento lineare di Kivy, che sembra meccanico."""
+
+    def on_progress(self, progression):
+        super().on_progress(AnimationTransition.out_cubic(progression))
+
+
+class EasedFadeTransition(FadeTransition):
+    """Dissolvenza con partenza e arrivo morbidi."""
+
+    def on_progress(self, progression):
+        super().on_progress(AnimationTransition.in_out_quad(progression))
+
+
 # Le schermate (tranne lo splash) si creano dopo l'avvio, una alla volta.
 SCREEN_CLASSES = {
     "search": SearchScreen, "deck": DeckScreen, "review": ReviewScreen,
@@ -1027,8 +1062,8 @@ class FlashcardApp(MDApp):
         # Qui si crea SOLO lo splash: il resto viene preparato dopo il primo
         # fotogramma (vedi on_start), cosi' la schermata iniziale compare subito.
         self.root = Builder.load_string(KV)
-        self._slide = SlideTransition(duration=SLIDE_SECONDS)
-        self._fade = FadeTransition(duration=FADE_SECONDS)
+        self._slide = EasedSlideTransition(duration=SLIDE_SECONDS)
+        self._fade = EasedFadeTransition(duration=FADE_SECONDS)
         self.root.transition = self._slide
         # Tasto "indietro" di Android (e ESC sul desktop): schermata precedente.
         Window.bind(on_keyboard=self._on_back_key)
@@ -1050,16 +1085,15 @@ class FlashcardApp(MDApp):
         Clock.schedule_once(lambda dt: self._on_splash_time(), SPLASH_DURATION_SECONDS)
 
     def _animate_splash(self):
+        """Il logo e' gia' al suo posto (come nel presplash nativo): sfumano
+        soltanto le scritte, una dopo l'altra."""
         ids = self.root.get_screen("splash").ids
-        for delay, name in ((0.0, "splash_logo"), (0.15, "splash_title"),
-                            (0.30, "splash_tagline"), (0.55, "splash_credit")):
+        for delay, name in ((0.10, "splash_title"), (0.25, "splash_tagline"),
+                            (0.45, "splash_credit")):
             widget = ids[name]
             fade_in = lambda dt, w=widget: Animation(  # noqa: E731
                 opacity=1, duration=SPLASH_FADE_SECONDS, t="out_quad").start(w)
-            if delay:
-                Clock.schedule_once(fade_in, delay)
-            else:
-                fade_in(0)
+            Clock.schedule_once(fade_in, delay)
 
     def _warm_next_screen(self):
         if self._warm_index < len(WARM_SCREENS):
